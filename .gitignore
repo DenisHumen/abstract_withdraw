@@ -1,1 +1,21 @@
+# Секреты и рабочие данные — НИКОГДА не коммитим
 .env
+data/wallets.xlsx
+data/proxies.txt
+data/state.db
+data/state.db-*
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store

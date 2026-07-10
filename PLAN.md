@@ -1,7 +1,8 @@
 # PLAN.md — Кроссчейн-вывод: Abstract → Base (Relay) → target EVM-адреса
 
-> Статус: **ЧЕРНОВИК НА РЕВЬЮ**. Код не пишется до подтверждения этого файла пользователем.
-> Дата: 2026-07-09. Автор: Claude (research + architecture).
+> Статус: **РЕАЛИЗОВАНО (прямой EOA-путь), ожидает боевого теста**. План подтверждён пользователем 10.07.2026.
+> Дата: 2026-07-09, обновлено 2026-07-10. Автор: Claude (research + architecture + implementation).
+> Текущее состояние кода и проверенные факты — в [CLAUDE.md](CLAUDE.md), пользовательская дока — в [README.md](README.md).
 
 ---
 
@@ -116,8 +117,13 @@ Relay — сеть кроссчейн-платежей (intents + DEX meta-aggre
 `POST /currencies/v1` с телом `{"chainIds":[2741]}` возвращает **весь индексируемый Relay список токенов
 Abstract** (без обязательного `term`). Ответ по токену: `chainId, address, symbol, name, decimals, vmType,
 metadata{logoURI, verified, isNative}`. Это и есть множество **потенциально маршрутизируемых** токенов —
-пересекаем с фактическими ончейн-балансами кошелька (см. §5, discovery). Опц. флаги: `verified`,
-`useExternalSearch`, `limit` (учитываем пагинацию). Заголовок `x-api-key` **не обязателен** (только выше rate-limit).
+пересекаем с фактическими ончейн-балансами кошелька (см. §5, discovery). Заголовок `x-api-key`
+**не обязателен** (только выше rate-limit).
+
+> **Проверено живым тестом (10.07.2026):** пагинации у `/currencies/v1` нет (`page`/`offset` игнорируются),
+> но `limit` принимает большие значения — на Abstract всего ~1031 токен, забирается одним вызовом
+> (`limit: 5000`). `verified:true` режет список до ~55 и не включает даже USDC → по умолчанию не используем.
+> В списке встречаются невалидные адреса (`0x`) — фильтруются на discovery.
 
 ### 1.4. Технические выводы по Abstract (критично)
 - **Abstract = chainId 2741**, zkSync ZK-stack, native ETH, RPC `https://api.mainnet.abs.xyz`
@@ -184,7 +190,7 @@ abstract_withdrow/
    │  ├─ schema.sql          # DDL
    │  ├─ models.py           # dataclasses/типы строк
    │  └─ dao.py              # CRUD + идемпотентные upsert-ы, транзакции
-   ├─ io/
+   ├─ data_io/               # (переименовано из io/ — не конфликтует со stdlib-модулем io)
    │  └─ excel.py            # чтение XLSX → sync в SQLite
    ├─ net/
    │  ├─ proxy.py            # пул прокси, привязка к кошельку, health-check, ротация при сбое
@@ -557,33 +563,34 @@ tokens:
 
 ---
 
-## 10. Дорожная карта реализации (после аппрува PLAN.md)
+## 10. Дорожная карта реализации — состояние на 10.07.2026
 
-1. Каркас проекта, `config.py`, `.env.example`, `requirements.txt`, `schema.sql`, логгер.
-2. `io/excel.py` + `db/dao.py` + команда `sync` (+ тесты синка/идемпотентности на фикстурах).
-3. `net/proxy.py` + `net/rpc.py` (пулы прокси/RPC, ротация) → затем `relay/client.py`
+1. ✅ Каркас проекта, `config.py`, `.env.example`, `requirements.txt`, `schema.sql`, логгер.
+2. ✅ `data_io/excel.py` + `db/dao.py` + команда `sync` (идемпотентность проверена E2E-тестом).
+3. ✅ `net/proxy.py` + `net/rpc.py` (пулы прокси/RPC, ротация) + `relay/client.py`
    (quote/v2, status/v3, currencies/v1, chains; публичный доступ, ретраи).
-4. `chains/abstract.py` (баланс, send EIP-1559, zksync2-fallback), `chains/base.py` (transfer + balance-watch),
-   `chains/multicall.py`, `chains/tokens.py` (discovery = Relay currencies ⋂ Multicall3).
-5. `core/pipeline.py` + `steps.py` — state machine, идемпотентность, `--dry-run`.
-6. Прогон в `dry_run` на 1 кошельке → верификация квот/маршрутов без отправки.
-7. Боевой прогон на 1 кошельке малой суммой → затем масштабирование (`concurrency`).
-8. (При необходимости) браузерная ветка `browser/adspower.py` + `browser/relay_ui.py`.
+4. ✅ `chains/abstract.py` (EIP-1559 prio=0, legacy/zksync2-fallback), `chains/base.py` (transfer +
+   balance-watch), `chains/multicall.py`, `chains/tokens.py` (discovery = Relay currencies ⋂ Multicall3).
+5. ✅ `core/pipeline.py` + `steps.py` — state machine, идемпотентность, `--dry-run`.
+6. ✅ Живые смоук-тесты (chains/currencies/quote/RPC/Multicall) + E2E dry-run на пустом кошельке.
+   Найдено и исправлено: невалидные адреса в списке Relay; `NO_SWAP_ROUTES_FOUND` → `SKIPPED`.
+7. ⏳ Боевой прогон на 1 кошельке малой суммой → затем масштабирование (`concurrency`).
+   **Ожидает заполнения `data/wallets.xlsx` пользователем.**
+8. ⬜ (При необходимости) браузерная ветка `browser/adspower.py` + `browser/relay_ui.py`
+   (сейчас — заглушка с контрактом реализации в `src/browser/__init__.py`).
 
 ---
 
-## 11. Что подтвердить на ревью
-1. **Хранение приватных ключей**: (b) только XLSX в память, или (a) + шифрование в БД? (план: b, опц. a).
-2. **Финальный transfer**: подтверждаем native-ETH transfer на `target_address` на Base (не ERC-20).
-3. **Discovery «всех токенов»** (без эксплореров): источник = Relay `POST /currencies/v1` (весь список токенов
-   Abstract) ⋂ ончейн `balanceOf` (Multicall3). Токены вне Relay-списка не бриджуемы → пропускаются.
-   ОК? Нужен ли `verified_only:true` (меньше скама) или ловим вообще всё с балансом?
-4. **Резервы газа** — теперь **динамическая оценка** через RPC + пол (`*_floor_wei`). Полы из §4.2 ок?
-5. **Slippage** 50 bps по умолчанию для «любой токен → ETH» — ок? (для «мусорных» токенов может понадобиться выше).
-6. **AdsPower**: нужен ли fallback сразу, или сначала только прямой EOA-путь (рекомендую сначала прямой).
-7. **Concurrency** 3 — ок как старт?
-8. **Прокси**: прокси задаёте в колонке `proxy` XLSX на каждый кошелёк, или общий пул `data/proxies.txt`
-   с автоназначением? (план поддерживает оба; приоритет — XLSX, иначе пул). Дайте формат/пример строки,
-   подтвердите `http` (не socks5).
+## 11. Решения, принятые на реализацию (дефолты; правятся в config.yaml)
+1. **Приватные ключи**: только XLSX → память процесса на время запуска; в БД не пишутся.
+2. **Финальный transfer**: native-ETH на `target_address` в Base.
+3. **Discovery**: Relay `POST /currencies/v1` ⋂ Multicall3 `balanceOf`; `verified_only: false`
+   (verified-список слишком узкий — нет даже USDC); скам без маршрута отсеивается статусом `SKIPPED`.
+4. **Резервы газа**: динамическая оценка через RPC × 1.5 + полы (0.0003 ETH Abstract / 0.0001 ETH Base).
+5. **Slippage**: 50 bps по умолчанию (`routing.slippage_bps`).
+6. **AdsPower**: пока не реализуем — прямой EOA-путь первичен; заглушка и контракт в `src/browser/`.
+7. **Concurrency**: 3 (`execution.concurrency`).
+8. **Прокси**: поддержаны оба источника — колонка `proxy` XLSX (приоритет) и пул `data/proxies.txt`;
+   схема `http`.
 
-> ⏸ Ожидаю ревью этого файла перед написанием кода.
+> ✅ План подтверждён, код реализован. Следующий шаг — боевой тест на нескольких кошельках.

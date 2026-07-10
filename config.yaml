@@ -1,0 +1,68 @@
+# Конфигурация запуска (не секреты). Секреты — в .env
+mode:
+  forward_mode: two_step          # bridge -> свой Base-адрес -> transfer на target
+  use_browser_fallback: never     # auto | never | always (браузерная ветка пока не реализована)
+  dry_run: false                  # true = считать/квотить без отправки транзакций
+
+routing:
+  origin_chain_id: 2741           # Abstract
+  dest_chain_id: 8453             # Base
+  dest_currency: "0x0000000000000000000000000000000000000000"   # native ETH на Base
+  trade_type: EXACT_INPUT
+  slippage_bps: 50                # проценты в bps; при "мусорных" токенах можно поднять
+
+amounts:
+  bridge_full_balance: true
+  # Резерв газа для native-ETH: динамическая оценка (gasPrice x gas x множитель), но не меньше пола.
+  gas_estimate_multiplier: 1.5
+  gas_reserve_abstract_floor_wei: "300000000000000"   # 0.0003 ETH — пол резерва на газ Abstract
+  gas_reserve_base_floor_wei:     "100000000000000"   # 0.0001 ETH — пол резерва на финальный transfer
+  # Порог "пыли" БЕЗ прайс-API: решаем по amountOut из квоты Relay.
+  min_native_out_wei: "200000000000000"               # < 0.0002 ETH на выходе -> SKIPPED
+  skip_if_out_lte_forward_gas: true
+
+execution:
+  concurrency: 3                  # кошельков параллельно
+  quote_ttl_sec: 30               # переквотить, если протухла
+  status_poll_interval_sec: 2
+  status_timeout_sec: 900         # ожидание bridge, сек
+  tx_confirmations: 1
+  wallet_delay_sec: [3, 10]       # случайная пауза между кошельками (мягче к лимитам)
+
+rpc:
+  rotate_on_failure: true
+  health_check: true              # быстрый eth_chainId перед боем
+  timeout_sec: 20
+  max_rotations_per_call: 3
+
+retry:
+  max_attempts: 5
+  backoff_base_sec: 2
+  backoff_max_sec: 60
+
+proxy:
+  enabled: true
+  scheme: http                    # формат login:passwd@ip:port
+  pool_file: data/proxies.txt
+  per_wallet_from_xlsx: true      # приоритет: колонка proxy из XLSX; иначе из пула
+  rotate_on_failure: true
+  max_rotations_per_job: 3
+  health_check: true              # GET https://api.relay.link/chains через прокси
+  health_check_timeout_sec: 8
+  sticky: true
+  persist_assignment: true
+
+tokens:
+  discovery: relay_currencies_plus_onchain   # Relay /currencies/v1 ⋂ Multicall3 balanceOf
+  include_native_eth: true
+  verified_only: false            # true = только verified из Relay-списка (меньше скама)
+  use_external_search: false
+  currencies_limit: 5000          # limit /currencies/v1 (пагинации нет; на Abstract ~1031 токен)
+  multicall_chunk: 200            # сколько balanceOf в одном вызове Multicall3
+  allowlist: []                   # доп. адреса токенов Abstract, если не попали в Relay-список
+  denylist: []                    # исключить (скам/невыводимые), адреса в lower-case
+
+paths:
+  wallets_xlsx: data/wallets.xlsx
+  db: data/state.db
+  logs_dir: logs
