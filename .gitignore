@@ -6,6 +6,10 @@ data/state.db
 data/state.db-*
 logs/
 
+# Временные lock-файлы Excel/Office
+~$*
+data/~$*
+
 # Python
 __pycache__/
 *.py[cod]
