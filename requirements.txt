@@ -10,6 +10,8 @@ rich>=13.7.0
 typer>=0.12.0
 tenacity>=8.3.0
 
+playwright>=1.44        # браузерная ветка для AGW-кошельков (вход одним ключом через Privy)
+
 # --- Опциональные (ставить при необходимости) ---
 # zksync2>=1.2.0        # fallback-подпись EIP-712 type-113 на Abstract (если стандартная tx не пройдёт)
-# playwright>=1.44      # браузерная fallback-ветка через AdsPower (см. PLAN.md §7)
+# После установки playwright выполнить: python -m playwright install chromium

@@ -506,21 +506,31 @@ tokens:
 
 ---
 
-## 7. Fallback: AdsPower + Playwright (ветка NEEDS_BROWSER)
+## 7. AGW-ветка: Playwright + один ключ (реализуется, `src/browser/`)
 
-Активируется если `use_browser_fallback != never` и (a) баланс EOA на Abstract пуст при ожидаемых средствах
-(признак AGW), либо (b) прямой путь подписи/деплоя падает.
+**Обновлено 2026-07-12 по факту исследования.** Тест-кошелёк оказался **AGW** (Abstract Global Wallet):
+средства в смарт-контракте, он-чейн подписант — встроенный Privy-ключ, а НЕ наш MetaMask-ключ
+(см. §1.4, детали в [CLAUDE.md](CLAUDE.md)). Прямой RPC/agw-client с MetaMask-ключом невозможен.
+Экспорт Privy-ключа headless невозможен (Privy: только ручное UI-действие). Поэтому — **браузер**.
 
-Поток:
-1. `GET {ADSPOWER_BASE_URL}/api/v1/browser/start?user_id=<profile>&...` (+ API-key заголовок) →
-   ответ содержит CDP endpoint `ws://127.0.0.1:<port>/devtools/browser/...`.
-2. Playwright: `chromium.connect_over_cdp(ws_endpoint)` → работаем в профиле с уже залогиненным кошельком.
-3. Сценарий на `relay.link/bridge`: выбрать Abstract→Base, токен, сумму (max), `recipient`=свой Base,
-   подтвердить в расширении кошелька, дождаться завершения.
-4. `GET /api/v1/browser/stop?user_id=<profile>` — закрыть профиль.
-5. Хэши/статусы по возможности парсим и пишем в те же `jobs`/`tx_log` (status=BRIDGED).
+**Ключевой результат:** вывод возможен **одним MetaMask-ключом БЕЗ расширения и БЕЗ AdsPower** —
+через инжектируемый `window.ethereum` в Playwright: relay.link → Privy cross-app вход (SIWE-подпись
+нашим ключом) → Privy сам подписывает мост встроенным ключом. Проверено вживую (вход как
+AGW `0xF094…a671`). AdsPower НЕ требуется (можно использовать для мульти-профилей, но не обязателен).
 
-Браузерная ветка реализуется **после** проверки прямого пути (по §1.4 для чистого EOA она, вероятно, не нужна).
+Поток (`src/browser/`):
+1. `make_injector(pk)` → инжект `window.ethereum` (подпись `personal_sign`/typedData одним ключом;
+   **0x-префикс обязателен** — hexbytes v1). Playwright: `launch_persistent_context(headless=False)` +
+   `expose_binding('__walletSign', signer)` + `add_init_script(inject_js)`.
+2. `login()`: Connect → **Abstract** → Privy popup → «Continue with a wallet» → MetaMask → SIWE(наш ключ)
+   → Approve. Возвращает подключённый AGW-адрес. **Проверено.**
+3. `bridge_native_eth()`: Buy→**ETH@Base**, `recipient`=наш Base-EOA (обязательно ≠ отправитель!),
+   сумма MAX, кнопка Bridge, подтвердить в Privy popup. Селекторы формы — доделать/валидировать.
+4. Далее — **программно** (как для EOA): ждём ETH на Base у нашего EOA, `transfer` на `target_address`.
+
+Интеграция в pipeline: для AGW-кошельков «deposit» на Abstract идёт через браузер, discovery — на
+AGW-адресе, всё остальное (state/idempotency/Base-transfer) переиспользуется.
+> ⚠ Реальный мост двигает средства — запускать только с явного согласия и малой суммой.
 
 ---
 

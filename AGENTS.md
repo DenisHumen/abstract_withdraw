@@ -1,4 +1,4 @@
-# CLAUDE.md — контекст проекта для ИИ-агентов
+# AGENTS.md — контекст проекта для ИИ-агентов
 
 ## Что это
 
@@ -21,7 +21,7 @@ Python 3.11+/3.12, стек: web3.py v7, httpx, openpyxl, sqlite3, typer+rich, t
 4. **Прокси на кошелёк** формата `login:passwd@ip:port`; при сбое — ротация на случайную из
    `data/proxies.txt`.
 5. Приватные ключи — только в памяти, в БД/логи не писать. Прокси-креды в логах маскировать.
-6. Держать PLAN.md/README/CLAUDE.md актуальными при изменениях.
+6. Держать PLAN.md/README/AGENTS.md актуальными при изменениях.
 7. Отчётность по задачам вести в `reports/worklog.xlsx`
    (колонки: Дата, День недели, Направление, Задача, Часы (оц.)) — дополнять при новых работах.
 
@@ -72,23 +72,9 @@ src/browser/           ЗАГЛУШКА fallback-ветки AdsPower+Playwright 
       **Диагностика: у этого EOA на Abstract 0 ETH, nonce 0, только скам-токены без маршрутов** —
       бриджить нечего. Для боевого теста самого бриджа нужен кошелёк с реальными средствами на Abstract
       + заполненный `target_address`.
-- [x] **AGW-ветка (браузер, один ключ)**: тест-кошелёк оказался AGW. Реализован вход одним
-      MetaMask-ключом через relay.link+Privy (`src/browser/`). Целевой AGW = `0xF094BE0c..a671`
-      (0.0032 ETH, им управляет ключ), НЕ `0xdF6d..Ae43` (другой логин). login() проверен вживую.
-- [ ] bridge_native_eth(): селекторы формы (Buy->Base, recipient, Confirm) — доделать + валидировать.
-- [ ] Интеграция AGW-ветки в pipeline (discovery на AGW-адресе, deposit через браузер, transfer прогр.).
-- [ ] Боевой тест бриджа малой суммой (с согласия пользователя).
+- [ ] Боевой тест собственно бриджа (ждёт кошелёк с активами на Abstract).
+- [ ] Браузерная fallback-ветка AdsPower (только если средства окажутся в AGW-контрактах).
 - [ ] Возможное расширение функционала (пользователь упоминал будущие доработки).
-
-## AGW-ветка (src/browser) — как это работает
-- `wallet_provider.make_injector(pk)` -> (addr, inject_js, signer). Инжектим window.ethereum,
-  подписываем personal_sign/typedData локально ОДНИМ ключом (без MetaMask-расширения). Крит.:
-  подпись 0x-префиксить (hexbytes v1 .hex() без 0x -> Privy 'Could not log in').
-- `relay_flow.login(page, ctx)` -> LoginResult(agw_address). Проверено. Retry клика Abstract, пока
-  не откроется Privy popup; в попапе: Continue with a wallet -> MetaMask -> Approve.
-- Playwright: launch_persistent_context(headless=False), ctx.expose_binding('__walletSign', signer),
-  ctx.add_init_script(inject_js). relay.link — shadow DOM (Dynamic), локаторы пронзают open shadow.
-- Тест: scratchpad/poc_login.py (эталон, стабильно логинится) и test_bridge_flow.py.
 
 ## Как тестировать без средств
 
