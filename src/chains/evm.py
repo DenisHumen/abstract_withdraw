@@ -100,33 +100,31 @@ class EvmClient:
         return tx
 
     def sign_and_send(self, tx: dict) -> str:
-        signed = self.account.sign_transaction(tx)
-        raw = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction")
         try:
-            tx_hash = self.w3.eth.send_raw_transaction(raw)
+            return self._raw_send(tx)
         except ValueError as e:
             text = str(e).lower()
             if "nonce" in text or "known" in text or "underpriced" in text:
                 raise RetryableError(f"send_raw: {e}") from e
             if "insufficient" in text:
                 raise PermanentError(f"send_raw: {e}") from e
-            raise self._maybe_legacy_fallback(tx, e)
-        return tx_hash.hex() if not isinstance(tx_hash, str) else tx_hash
+            # Некоторые ноды/сети не принимают type-2 — пробуем legacy тем же nonce.
+            if any(k in text for k in ("type", "eip-1559", "not supported")):
+                legacy = {k: v for k, v in tx.items()
+                          if k not in ("maxFeePerGas", "maxPriorityFeePerGas", "type")}
+                legacy["gasPrice"] = self.gas_price()
+                try:
+                    return self._raw_send(legacy)
+                except Exception as e2:  # noqa: BLE001
+                    raise RetryableError(f"legacy fallback: {e2}") from e2
+            raise RetryableError(f"send_raw: {e}") from e
 
-    def _maybe_legacy_fallback(self, tx: dict, original: Exception) -> Exception:
-        """Некоторые ноды/сети не принимают type-2 — пробуем legacy на месте."""
-        text = str(original).lower()
-        if "type" in text or "eip-1559" in text or "not supported" in text:
-            legacy = {k: v for k, v in tx.items() if k not in ("maxFeePerGas", "maxPriorityFeePerGas", "type")}
-            legacy["gasPrice"] = self.gas_price()
-            try:
-                signed = self.account.sign_transaction(legacy)
-                raw = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction")
-                self.w3.eth.send_raw_transaction(raw)
-                return RetryableError("legacy fallback отправлен, проверьте receipt")  # pragma: no cover
-            except Exception as e2:  # noqa: BLE001
-                return RetryableError(f"legacy fallback: {e2}")
-        return RetryableError(f"send_raw: {original}")
+    def _raw_send(self, tx: dict) -> str:
+        signed = self.account.sign_transaction(tx)
+        raw = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction")
+        tx_hash = self.w3.eth.send_raw_transaction(raw)
+        h = tx_hash if isinstance(tx_hash, str) else tx_hash.hex()
+        return h if h.startswith("0x") else "0x" + h
 
     def send(self, to: str, data: str | None = None, value: int = 0, gas: int | None = None) -> str:
         tx = self.build_tx(to, data, value, gas)
