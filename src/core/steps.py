@@ -236,6 +236,14 @@ def wait_bridge(ctx: WalletCtx, job: Job, base_baseline: int | None) -> int:
 
 def forward_transfer(ctx: WalletCtx, job: Job) -> None:
     """Финальный native transfer ETH: свой Base-адрес -> target_address (весь баланс - газ)."""
+    # Защита: без адреса назначения не отправляем (задача остаётся ждать target_address).
+    if not ctx.wallet.target_address:
+        ctx.dao.update_job(job.id, status="BRIDGED")
+        logger.warn(
+            "средства на Base, но target_address не задан — ждём адрес",
+            wallet=ctx.wallet.address, token=job.symbol, step="TRANSFER",
+        )
+        return
     prev = ctx.dao.get_tx(job.id, "transfer")
     if prev is not None and prev["status"] == "confirmed":
         ctx.dao.update_job(job.id, status="DONE")

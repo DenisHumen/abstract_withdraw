@@ -231,7 +231,7 @@ CREATE TABLE wallets (
   id              INTEGER PRIMARY KEY,
   address         TEXT NOT NULL UNIQUE,       -- EOA (0x..), выводится из приватного ключа
   pk_ref          TEXT NOT NULL,              -- ссылка на ключ (см. §4.3, ключ в БД НЕ хранится в открытом виде)
-  target_address  TEXT NOT NULL,              -- целевой EVM-адрес для финального transfer
+  target_address  TEXT,                       -- целевой EVM-адрес; NULL = ждём адрес (задача WAITING_TARGET)
   proxy           TEXT,                       -- текущий HTTP-прокси login:passwd@ip:port (из XLSX или назначен из пула)
   proxy_source    TEXT,                       -- 'xlsx' | 'pool' — откуда взят текущий прокси
   proxy_status    TEXT DEFAULT 'unknown',     -- unknown | ok | dead (обновляется health-check/ротацией)
@@ -264,6 +264,7 @@ CREATE TABLE jobs (
   amount_in     TEXT,                         -- wei, зафиксировано на этапе QUOTE
   status        TEXT NOT NULL DEFAULT 'PENDING',
     -- PENDING → DISCOVERED → QUOTED → APPROVED → DEPOSITED → BRIDGED → TRANSFERRED → DONE
+    -- ожидание: WAITING_TARGET (нет target_address — задача в очереди, ончейн-действий нет)
     -- терминальные/особые: FAILED, SKIPPED (dust/no route), REFUNDED, NEEDS_BROWSER
   request_id    TEXT,                         -- Relay requestId (идемпотентность bridge)
   amount_out    TEXT,                         -- фактически получено ETH@Base (wei)
@@ -404,10 +405,14 @@ tokens:
 Опции (выбор на ревью): (a) шифровать в БД ключом `WALLET_ENCRYPTION_KEY`, (b) держать XLSX как единственный
 источник ключей и читать в память только на время запуска. По умолчанию план — **(b) + опц. шифрование (a)**.
 
-### 4.4. Синхронизация Excel → SQLite
-- Считаем hash XLSX; если не менялся — пропускаем ресинк.
+### 4.4. Синхронизация Excel → SQLite (XLSX — источник истины)
+- Считаем hash XLSX; если не менялся — можно пропускать ресинк (сейчас синк идёт всегда перед run).
 - `upsert` по `address`: добавляем новые, обновляем `target_address`/`label`/`enabled`/`proxy`, **не трогаем** прогресс `jobs`.
-- Удалённые из XLSX кошельки НЕ удаляем из БД (помечаем `enabled=0`), чтобы не терять историю.
+- **Удалённые из XLSX кошельки удаляются из БД** вместе с их `jobs`/`token_balances`/`tx_log` (каскад вручную).
+  Защита: удаление выполняется только если XLSX успешно распарсен и содержит ≥1 валидный кошелёк
+  (пустой/битый файл не обнуляет БД).
+- **`target_address` опционален**: пусто → задачи держатся в `WAITING_TARGET` без ончейн-действий;
+  как только адрес появится в XLSX и пройдёт `sync` — задачи возобновляются (сбрасываются в `DISCOVERED`).
 
 ### 4.5. Прокси: формат, пул и ротация
 Цель — избежать рейт-лимитов Relay/RPC и держать **консистентный IP на кошелёк**.

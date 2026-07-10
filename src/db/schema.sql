@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS wallets (
   id               INTEGER PRIMARY KEY,
   address          TEXT NOT NULL UNIQUE,      -- EOA (checksum), выводится из приватного ключа
   pk_ref           TEXT NOT NULL DEFAULT 'xlsx', -- откуда берём ключ ('xlsx'); сам ключ в БД НЕ хранится
-  target_address   TEXT NOT NULL,             -- целевой EVM-адрес финального transfer
+  target_address   TEXT,                      -- целевой EVM-адрес финального transfer; NULL = ждём адрес (WAITING_TARGET)
   proxy            TEXT,                      -- текущий HTTP-прокси login:passwd@ip:port
   proxy_source     TEXT,                      -- 'xlsx' | 'pool'
   proxy_status     TEXT DEFAULT 'unknown',    -- unknown | ok | dead
@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   amount_in   TEXT,
   status      TEXT NOT NULL DEFAULT 'PENDING',
     -- PENDING -> DISCOVERED -> QUOTED -> APPROVED -> DEPOSITED -> BRIDGED -> TRANSFERRED -> DONE
+    -- ожидание: WAITING_TARGET (нет target_address — задача в очереди, ончейн-действий нет)
     -- терминальные/особые: FAILED, SKIPPED, REFUNDED, NEEDS_BROWSER
   request_id  TEXT,
   amount_out  TEXT,

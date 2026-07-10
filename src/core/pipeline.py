@@ -21,7 +21,8 @@ from src.core.errors import (
     RetryableError,
 )
 from src.db.dao import Dao
-from src.db.models import TERMINAL_STATUSES, Wallet
+from src.db.models import FAILED_STATUSES, TERMINAL_STATUSES, WAITING_TARGET, Wallet
+from web3 import Web3
 from src.net.proxy import ProxyPool, is_proxy_error
 from src.net.rpc import RpcPool
 from src.relay.client import RelayClient
@@ -129,11 +130,33 @@ class Pipeline:
         jobs = self.dao.get_jobs(wallet.id)
         jobs.sort(key=lambda j: (j.token_addr == NATIVE_TOKEN, j.id))
 
+        # Нет адреса назначения -> держим задачи в очереди (WAITING_TARGET), ончейн-действий не делаем.
+        # Как только target_address появится в XLSX (при следующем sync) — задачи продолжатся.
+        has_target = bool(wallet.target_address) and Web3.is_address(wallet.target_address or "")
+        if not has_target:
+            waiting = 0
+            for job in jobs:
+                if job.status in TERMINAL_STATUSES or job.status in FAILED_STATUSES:
+                    continue
+                if job.status in ("BRIDGED", "TRANSFERRED"):
+                    continue  # уже сбриджено на свой Base — ждём target для финального transfer
+                if job.status != WAITING_TARGET:
+                    self.dao.update_job(job.id, status=WAITING_TARGET, last_error="нет target_address")
+                waiting += 1
+            logger.warn(
+                f"target_address не задан — {waiting} задач(и) в очереди (WAITING_TARGET), ончейн-действий нет",
+                wallet=wallet.address, step="QUEUE",
+            )
+            return
+
         for job in jobs:
             if job.status in TERMINAL_STATUSES or job.status == "NEEDS_BROWSER":
                 continue
+            if job.status == WAITING_TARGET:
+                # target появился — возвращаем задачу в работу
+                self.dao.update_job(job.id, status="DISCOVERED", last_error=None)
             token = by_addr.get(job.token_addr)
-            if token is None and job.status in ("PENDING", "DISCOVERED"):
+            if token is None and job.status in ("PENDING", "DISCOVERED", WAITING_TARGET):
                 continue  # баланса больше нет и работа не начата
             self._process_job(ctx, job.id, token, dry_run)
 

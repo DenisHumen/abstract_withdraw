@@ -17,13 +17,17 @@ JOB_FLOW = [
 ]
 TERMINAL_STATUSES = {"DONE", "SKIPPED"}
 FAILED_STATUSES = {"FAILED", "REFUNDED", "NEEDS_BROWSER"}
+# Статусы-«точки входа» в конвейер (начинаем/продолжаем обработку с них)
+ENTRY_STATUSES = {"PENDING", "DISCOVERED", "QUOTED", "APPROVED", "WAITING_TARGET"}
+# Ожидание внешнего условия (target_address) — ончейн-действий нет
+WAITING_TARGET = "WAITING_TARGET"
 
 
 @dataclass
 class Wallet:
     id: int
     address: str
-    target_address: str
+    target_address: str | None  # None = адрес назначения ещё не задан в XLSX
     proxy: str | None
     proxy_source: str | None
     proxy_status: str

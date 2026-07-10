@@ -117,7 +117,8 @@ def status(config: str = typer.Option(None)):
         table.add_column(col, overflow="fold")
     style = {
         "DONE": "green", "BRIDGED": "cyan", "TRANSFERRED": "cyan",
-        "FAILED": "red", "REFUNDED": "red", "NEEDS_BROWSER": "yellow", "SKIPPED": "dim",
+        "FAILED": "red", "REFUNDED": "red", "NEEDS_BROWSER": "yellow",
+        "WAITING_TARGET": "yellow", "SKIPPED": "dim",
     }
     for r in rows:
         table.add_row(

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from eth_account import Account
 from openpyxl import Workbook, load_workbook
+from web3 import Web3
 
 from src.db.dao import Dao
 from src import logger
@@ -18,7 +19,7 @@ COLUMNS = ["address", "private_key", "target_address", "proxy", "adspower_profil
 class XlsxWallet:
     address: str
     private_key: str
-    target_address: str
+    target_address: str | None  # None = адрес назначения ещё не задан
     proxy: str | None
     adspower_profile: str | None
     label: str | None
@@ -74,9 +75,13 @@ def read_wallets(path: Path) -> list[XlsxWallet]:
                 f"строка {n}: address ({declared}) не совпадает с ключом ({derived}) — пропуск"
             )
             continue
-        if not target:
-            logger.error(f"строка {n}: не задан target_address — пропуск")
+        # target_address может быть пустым: задача встанет в очередь (WAITING_TARGET)
+        # и выполнится, как только адрес появится в XLSX. Если задан — валидируем.
+        if target and not Web3.is_address(target):
+            logger.error(f"строка {n}: target_address ({target}) невалиден — пропуск")
             continue
+        if target:
+            target = Web3.to_checksum_address(target)
 
         enabled_raw = (cell(row, "enabled") or "1").lower()
         wallets.append(
@@ -109,10 +114,15 @@ def sync_to_db(path: Path, dao: Dao) -> dict[str, str]:
         )
         keys[w.address] = w.private_key
 
+    # XLSX — главный источник: строки, пропавшие из файла, удаляются из БД вместе с их задачами.
+    # Защита: удаляем только если файл успешно распарсен и содержит хотя бы один кошелёк
+    # (пустой/битый XLSX не должен обнулять базу).
     if wallets:
-        disabled = dao.disable_wallets_not_in([w.address for w in wallets])
-        if disabled:
-            logger.warn(f"{disabled} кошельков пропали из XLSX -> enabled=0")
+        removed = dao.delete_wallets_not_in([w.address for w in wallets])
+        if removed:
+            logger.warn(f"{removed} кошельков удалены из БД (нет в XLSX)")
+    else:
+        logger.warn("в XLSX нет валидных кошельков — удаление из БД пропущено (защита от обнуления)")
 
     if dao.get_meta("xlsx_hash") != h:
         dao.set_meta("xlsx_hash", h)
@@ -136,7 +146,7 @@ def create_template(path: Path) -> None:
         [
             "(опц.) 0x...adres — можно оставить пустым",
             "0x...privkey EVM-кошелька (ОБЯЗАТЕЛЬНО)",
-            "0x...куда слать ETH на Base (ОБЯЗАТЕЛЬНО)",
+            "0x...куда слать ETH на Base (можно пусто -> задача ждёт адрес)",
             "login:passwd@ip:port (опц.)",
             "(опц.)",
             "(опц.)",

@@ -53,7 +53,7 @@ class Dao:
     def upsert_wallet(
         self,
         address: str,
-        target_address: str,
+        target_address: str | None,
         proxy: str | None,
         adspower_profile: str | None,
         label: str | None,
@@ -93,18 +93,29 @@ class Dao:
         row = c.execute("SELECT id FROM wallets WHERE address=?", (address,)).fetchone()
         return int(row["id"])
 
-    def disable_wallets_not_in(self, addresses: list[str]) -> int:
-        """Кошельки, пропавшие из XLSX, помечаем enabled=0 (историю не удаляем)."""
+    def delete_wallets_not_in(self, addresses: list[str]) -> int:
+        """XLSX — источник истины: кошельки, пропавшие из файла, удаляются вместе с их
+        задачами/балансами/логами транзакций (каскад вручную — FK-cascade в SQLite off by default)."""
         c = self._conn()
         if not addresses:
             return 0
         placeholders = ",".join("?" for _ in addresses)
-        cur = c.execute(
-            f"UPDATE wallets SET enabled=0, updated_at=? WHERE address NOT IN ({placeholders})",
-            [_now(), *addresses],
-        )
+        rows = c.execute(
+            f"SELECT id FROM wallets WHERE address NOT IN ({placeholders})", addresses
+        ).fetchall()
+        ids = [r["id"] for r in rows]
+        if not ids:
+            return 0
+        c.execute("BEGIN IMMEDIATE")
+        for wid in ids:
+            c.execute(
+                "DELETE FROM tx_log WHERE job_id IN (SELECT id FROM jobs WHERE wallet_id=?)", (wid,)
+            )
+            c.execute("DELETE FROM jobs WHERE wallet_id=?", (wid,))
+            c.execute("DELETE FROM token_balances WHERE wallet_id=?", (wid,))
+            c.execute("DELETE FROM wallets WHERE id=?", (wid,))
         c.commit()
-        return cur.rowcount
+        return len(ids)
 
     def get_wallets(self, enabled_only: bool = True) -> list[Wallet]:
         q = "SELECT * FROM wallets"
