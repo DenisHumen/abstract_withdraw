@@ -182,26 +182,60 @@ def bridge_native_eth(
         note.append("dry: остановка до подтверждения")
         return {"filled": bool(max_clicked), "confirmed": False, "note": "; ".join(note)}
 
-    # Нажать основную кнопку моста
-    pressed = _click_first(page, ["Bridge", "Swap", "Review", "Confirm"], timeout=6000)
-    note.append(f"submit={pressed or 'fail'}")
-    page.wait_for_timeout(3000)
-    shot("b04_submit.png")
-
-    # Подтвердить в Privy popup
-    privy = _wait_for_privy_popup(context, 30000)
-    confirmed = False
-    if privy:
-        for _ in range(10):
-            if privy.is_closed():
-                confirmed = True
+    # Нажать ГЛАВНУЮ кнопку действия. ВНИМАНИЕ: у стрелки смены направления accessible name
+    # тоже 'Swap' -> нельзя матчить по name='Swap' (перевернёт маршрут!). Главная кнопка —
+    # видимый текст РОВНО 'SWAP' (верхний регистр) внизу виджета.
+    # accessible name главной кнопки = 'Swap' (визуально SWAP через CSS uppercase). У стрелки
+    # смены направления name тоже 'Swap' и она ПЕРВАЯ в DOM -> берём ПОСЛЕДНЮЮ (главная внизу).
+    pressed = None
+    for getter in [
+        lambda: page.get_by_role("button", name="Swap", exact=True),
+        lambda: page.get_by_role("button", name=re.compile(r"^(Bridge|Review|Confirm swap)$", re.I)),
+    ]:
+        try:
+            loc = getter()
+            n = loc.count()
+            if n > 0:
+                loc.nth(n - 1).click(timeout=6000)  # последняя = главная кнопка действия
+                pressed = f"SWAP(of {n})"
                 break
-            privy.wait_for_timeout(2000)
-            if _click_first(privy, ["Confirm", "Approve", "Sign", "Send"], timeout=3000):
-                confirmed = True
-    note.append(f"confirmed={confirmed}")
-    shot("b05_after_confirm.png")
-    return {"filled": bool(max_clicked), "confirmed": confirmed, "note": "; ".join(note)}
+        except Exception:
+            continue
+    note.append(f"submit={pressed or 'fail'}")
+    page.wait_for_timeout(2500)
+    shot("b05_after_swap.png")
+
+    # Иногда relay.link показывает in-page 'Confirm' перед попапом Privy
+    _click_first(page, ["Confirm swap", "Confirm bridge", "Confirm"], timeout=4000)
+    page.wait_for_timeout(2000)
+
+    # Подтвердить транзакцию в Privy popup (AGW подписывает встроенным ключом).
+    # КРИТИЧНО: не крашиться при закрытии попапа и НЕ закрывать браузер сразу после Approve —
+    # Privy подписывает/шлёт tx клиентски, нужно время. Ждём инкремент nonce снаружи (в раннере).
+    privy = _wait_for_privy_popup(context, 30000)
+    approved = False
+    if privy:
+        for i in range(20):
+            try:
+                if privy.is_closed():
+                    break
+                if shots_dir:
+                    try:
+                        privy.screenshot(path=str(shots_dir / f"b06_privy_tx{i}.png"))
+                    except Exception:
+                        pass
+                if not approved:
+                    if _click_first(privy, ["Approve", "Confirm", "Sign", "Send"], timeout=2500):
+                        approved = True
+                        logger.info("popup: подтверждение отправлено", step="BROWSER")
+                privy.wait_for_timeout(2000)
+            except Exception:
+                break  # попап закрылся -> подтверждение ушло
+    note.append(f"approved={approved}")
+    # держим страницу открытой, чтобы Privy успел подписать и отправить deposit-tx
+    page.wait_for_timeout(12000)
+    shot("b07_final.png")
+    return {"filled": bool(max_clicked), "approved": approved, "note": "; ".join(note)}
 
 
 def _click_by_text(page: Page, text: str) -> bool:
