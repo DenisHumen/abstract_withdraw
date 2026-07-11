@@ -243,23 +243,53 @@ def _set_buy_base_eth(page: Page) -> bool:
 
 
 def _set_recipient(page: Page, recipient: str) -> bool:
-    """Открыть поле получателя (в панели Buy — адресный дропдаун) и ввести адрес."""
-    for opener in ["Recipient", "To address", "Send to", "Custom address", "Add recipient", "Enter address"]:
+    """Задать получателя в панели Buy (по скринам пользователя):
+    дропдаун адреса в Buy -> 'Paste wallet address' -> поле 'Address or ENS' -> Save.
+    Так НЕ нужно подключать второй кошелёк — просто вставляем наш Base-EOA.
+    """
+    # 1+2) открыть дропдаун адреса и нажать 'Paste wallet address'.
+    # Усечение relay.link — через юникод-эллипсис (…), поэтому [.…]. Дропдаунов несколько
+    # (панель кошелька, Sell, Buy) — пробуем каждый, пока не появится пункт 'Paste wallet address'.
+    dd = page.get_by_text(re.compile(r"0x[0-9a-fA-F]{2,8}[.…]{1,3}[0-9a-fA-F]{4}"))
+    n = dd.count()
+    pasted = False
+    for idx in range(n - 1, -1, -1):  # Buy-дропдаун обычно ниже -> идём с конца
         try:
-            el = page.get_by_text(opener, exact=False)
-            if el.count() > 0:
-                el.first.click(timeout=2500)
-                page.wait_for_timeout(800)
+            dd.nth(idx).click(timeout=2500)
+            page.wait_for_timeout(700)
+            paste = page.get_by_text("Paste wallet address", exact=False)
+            if paste.count() > 0:
+                paste.first.click(timeout=3000)
+                pasted = True
                 break
+            # закрыть меню, если открылось не то
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
         except Exception:
             continue
-    for ph in ["Address or ENS", "Enter address", "Recipient address", "Wallet address", "0x"]:
+    if not pasted:
+        return False
+    page.wait_for_timeout(800)
+
+    # 3) ввести адрес в 'Address or ENS'
+    filled = False
+    for ph in ["Address or ENS", "Address", "Enter address"]:
         try:
             inp = page.get_by_placeholder(ph, exact=False)
             if inp.count() > 0:
                 inp.first.fill(recipient, timeout=3000)
-                page.wait_for_timeout(500)
-                return True
+                filled = True
+                break
         except Exception:
             continue
-    return False
+    if not filled:
+        return False
+    page.wait_for_timeout(600)
+
+    # 4) Save
+    try:
+        page.get_by_role("button", name="Save", exact=False).first.click(timeout=4000)
+    except Exception:
+        _click_by_text(page, "Save")
+    page.wait_for_timeout(800)
+    return True
