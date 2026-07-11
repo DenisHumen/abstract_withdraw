@@ -72,13 +72,26 @@ src/browser/           ЗАГЛУШКА fallback-ветки AdsPower+Playwright 
       **Диагностика: у этого EOA на Abstract 0 ETH, nonce 0, только скам-токены без маршрутов** —
       бриджить нечего. Для боевого теста самого бриджа нужен кошелёк с реальными средствами на Abstract
       + заполненный `target_address`.
-- [x] **AGW-ветка (браузер, один ключ)**: тест-кошелёк оказался AGW. Реализован вход одним
-      MetaMask-ключом через relay.link+Privy (`src/browser/`). Целевой AGW = `0xF094BE0c..a671`
-      (0.0032 ETH, им управляет ключ), НЕ `0xdF6d..Ae43` (другой логин). login() проверен вживую.
-- [ ] bridge_native_eth(): селекторы формы (Buy->Base, recipient, Confirm) — доделать + валидировать.
-- [ ] Интеграция AGW-ветки в pipeline (discovery на AGW-адресе, deposit через браузер, transfer прогр.).
-- [ ] Боевой тест бриджа малой суммой (с согласия пользователя).
+- [x] **AGW-ветка (браузер, один ключ) — РАБОТАЕТ END-TO-END НА РЕАЛЬНЫХ СРЕДСТВАХ.**
+      Тест-кошелёк оказался AGW. Целевой AGW = `0xF094BE0c..a671`, им управляет MetaMask-ключ
+      (НЕ `0xdF6d..Ae43` — другой логин). Проверено вживую 2026-07-11: мост 0.003146 ETH
+      Abstract->Base, funds landed на `0x47Af..3148` (AGW 0.003243->0.000076, Base +0.003146).
+      Полная цепочка: login -> Buy=ETH@Base -> recipient=paste Base-EOA -> MAX -> SWAP ->
+      Approve в Privy popup -> deposit-tx из AGW -> relayer -> Base.
+- [ ] Интеграция AGW-ветки в pipeline (discovery на AGW-адресе, deposit через браузер, transfer
+      прогр. Base-EOA -> target). Сейчас логика в scratchpad/real_bridge.py + src/browser/.
+- [ ] Обобщить на ERC-20 (сейчас native ETH) и на несколько кошельков (профили/сессии).
 - [ ] Возможное расширение функционала (пользователь упоминал будущие доработки).
+
+## КРИТИЧНЫЕ уроки браузерной автоматизации relay.link (не переоткрывать)
+- Кнопка SWAP: accessible name = 'Swap' (визуально SWAP через CSS uppercase), ТАКОЙ ЖЕ у стрелки
+  смены направления -> брать `.last` (главная внизу DOM), НЕ `name='Swap'` первую (перевернёт маршрут!).
+- Recipient: усечение адреса юникод-эллипсисом '…' (не '...'); флоу: дропдаун Buy -> 'Paste wallet
+  address' -> 'Address or ENS' -> Save. Перебирать дропдауны до появления 'Paste wallet address'.
+- Buy по умолчанию = ETH@Abstract (тот же чейн) -> надо сменить на Base, иначе 'Invalid recipient'.
+- Confirm tx: попап 'Approve transaction' с кнопкой 'Approve'. НЕ крашиться при закрытии попапа и
+  НЕ закрывать браузер сразу — Privy подписывает/шлёт клиентски (~10с). Ждать инкремент nonce AGW.
+- Abstract-клик в модалке Dynamic флейкует (shadow DOM) -> ретраить, пока не откроется Privy popup.
 
 ## AGW-ветка (src/browser) — как это работает
 - `wallet_provider.make_injector(pk)` -> (addr, inject_js, signer). Инжектим window.ethereum,
