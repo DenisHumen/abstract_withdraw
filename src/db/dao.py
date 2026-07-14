@@ -67,15 +67,16 @@ class Dao:
         adspower_profile: str | None,
         label: str | None,
         enabled: bool,
+        agw_address: str | None = None,
     ) -> int:
         """Идемпотентный upsert по address. Прогресс jobs не трогаем."""
         c = self._conn()
         now = _now()
         c.execute(
             """
-            INSERT INTO wallets(address, target_address, proxy, proxy_source,
+            INSERT INTO wallets(address, target_address, agw_address, proxy, proxy_source,
                                 adspower_profile, label, enabled, created_at, updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(address) DO UPDATE SET
               target_address=excluded.target_address,
               adspower_profile=excluded.adspower_profile,
@@ -84,11 +85,14 @@ class Dao:
               updated_at=excluded.updated_at,
               -- прокси из XLSX имеет приоритет; назначенную из пула не затираем пустотой
               proxy=CASE WHEN excluded.proxy IS NOT NULL THEN excluded.proxy ELSE wallets.proxy END,
-              proxy_source=CASE WHEN excluded.proxy IS NOT NULL THEN 'xlsx' ELSE wallets.proxy_source END
+              proxy_source=CASE WHEN excluded.proxy IS NOT NULL THEN 'xlsx' ELSE wallets.proxy_source END,
+              -- AGW из XLSX имеет приоритет; полученный входом (в БД) не затираем пустотой
+              agw_address=CASE WHEN excluded.agw_address IS NOT NULL THEN excluded.agw_address ELSE wallets.agw_address END
             """,
             (
                 address,
                 target_address,
+                agw_address,
                 proxy,
                 "xlsx" if proxy else None,
                 adspower_profile,

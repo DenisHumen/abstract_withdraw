@@ -12,7 +12,7 @@ from web3 import Web3
 from src.db.dao import Dao
 from src import logger
 
-COLUMNS = ["address", "private_key", "target_address", "proxy", "adspower_profile", "label", "enabled"]
+COLUMNS = ["address", "private_key", "target_address", "agw_address", "proxy", "adspower_profile", "label", "enabled"]
 
 
 @dataclass
@@ -20,6 +20,7 @@ class XlsxWallet:
     address: str
     private_key: str
     target_address: str | None  # None = адрес назначения ещё не задан
+    agw_address: str | None  # опц.: если знаете Privy/AGW-адрес — вход на relay.link пропускается
     proxy: str | None
     adspower_profile: str | None
     label: str | None
@@ -83,12 +84,21 @@ def read_wallets(path: Path) -> list[XlsxWallet]:
         if target:
             target = Web3.to_checksum_address(target)
 
+        # опц. AGW/Privy-адрес: если задан — пропустим вход на relay.link (быстро/масштабно)
+        agw = cell(row, "agw_address")
+        if agw and not Web3.is_address(agw):
+            logger.warn(f"строка {n}: agw_address ({agw}) невалиден — игнорирую")
+            agw = None
+        if agw:
+            agw = Web3.to_checksum_address(agw)
+
         enabled_raw = (cell(row, "enabled") or "1").lower()
         wallets.append(
             XlsxWallet(
                 address=derived,
                 private_key=pk,
                 target_address=target,
+                agw_address=agw,
                 proxy=cell(row, "proxy"),
                 adspower_profile=cell(row, "adspower_profile"),
                 label=cell(row, "label"),
@@ -111,6 +121,7 @@ def sync_to_db(path: Path, dao: Dao) -> dict[str, str]:
             adspower_profile=w.adspower_profile,
             label=w.label,
             enabled=w.enabled,
+            agw_address=w.agw_address,
         )
         keys[w.address] = w.private_key
 
@@ -147,10 +158,14 @@ def create_template(path: Path) -> None:
             "(опц.) 0x...adres — можно оставить пустым",
             "0x...privkey EVM-кошелька (ОБЯЗАТЕЛЬНО)",
             "0x...куда слать ETH на Base (можно пусто -> задача ждёт адрес)",
+            "(опц.) 0x...AGW/Privy-адрес -> пропустить вход, сразу DeBank",
             "login:passwd@ip:port (опц.)",
             "(опц.)",
             "(опц.)",
             "1",
         ]
     )
+    widths2 = [46, 70, 46, 46, 40, 18, 16, 9]
+    for col, width in zip("ABCDEFGH", widths2):
+        ws.column_dimensions[col].width = width
     wb.save(path)
