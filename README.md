@@ -35,7 +35,24 @@ python -m venv .venv
 # прогресс / перезапуск упавших
 .\.venv\Scripts\python -m src.main status
 .\.venv\Scripts\python -m src.main retry
+
+# интерактивное меню (запуск без команды) — удобное переключение режимов
+.\.venv\Scripts\python -m src.main
+
+# чекер протоколов: вход на relay.link -> AGW-адрес -> DeBank -> Excel-отчёт
+.\.venv\Scripts\python -m src.main check-protocols
+.\.venv\Scripts\python -m src.main report-protocols   # только перегенерировать Excel из БД
 ```
+
+## Чекер протоколов (DeBank)
+
+Определяет, какие DeFi-протоколы использует каждый кошелёк:
+1. вход на сайт моста (relay.link) вашим ключом → получаем и сохраняем **AGW/Privy-адрес** (`wallets.agw_address`);
+2. открываем `debank.com/profile/<agw>` и перехватываем данные портфеля;
+3. пишем в БД: каталог протоколов `protocols` (растёт по мере обнаружения новых) + позиции `wallet_protocols`;
+4. по завершении сохраняем `reports/protocols_report.xlsx` (листы: protocols / summary / catalog).
+
+Браузер использует прокси кошелька; Privy-сессия кэшируется в `data/.browser/<addr>` (повторный вход мгновенный).
 
 ## Формат data/wallets.xlsx
 

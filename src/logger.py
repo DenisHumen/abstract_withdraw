@@ -73,6 +73,28 @@ def log(
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def print_protocols(wallet, agw: str, res) -> None:
+    """Красивая таблица протоколов кошелька (rich)."""
+    from rich.panel import Panel
+    from rich.table import Table
+
+    title = f"[bold]{wallet.label or short_addr(wallet.address)}[/bold]  AGW [cyan]{short_addr(agw)}[/cyan]  chains: {','.join(res.used_chains) or '-'}"
+    table = Table(show_header=True, header_style="bold magenta", expand=False)
+    table.add_column("Протокол", style="cyan", overflow="fold")
+    table.add_column("Chain")
+    table.add_column("Тип позиции")
+    table.add_column("USD", justify="right", style="green")
+    total = 0.0
+    for pr in sorted(res.protocols, key=lambda x: -x.net_usd):
+        total += pr.net_usd
+        table.add_row(pr.name, pr.chain, ", ".join(pr.item_types) or "-", f"${pr.net_usd:,.2f}")
+    if not res.protocols:
+        table.add_row("[dim]протоколов не найдено[/dim]", "-", "-", "-")
+    tok_usd = sum(t.usd_value for t in res.tokens)
+    caption = f"протоколов: {len(res.protocols)}  •  в протоколах: ${total:,.2f}  •  токенов в кошельке: {len(res.tokens)} (${tok_usd:,.2f})"
+    console.print(Panel(table, title=title, subtitle=caption, border_style="blue"))
+
+
 def info(msg: str, **kw) -> None:
     log("INFO", msg, **kw)
 

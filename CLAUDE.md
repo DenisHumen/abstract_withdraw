@@ -28,7 +28,8 @@ Python 3.11+/3.12, стек: web3.py v7, httpx, openpyxl, sqlite3, typer+rich, t
 ## Карта кода
 
 ```
-src/main.py            CLI: init-data | sync | discover | run [--dry-run] | status | retry
+src/main.py            CLI: init-data|sync|discover|run|status|retry|check-protocols|report-protocols;
+                       интерактивное меню (запуск без команды), цветной rich-вывод
 src/config.py          .env (EnvSettings) + config.yaml (AppConfig); константы NATIVE_TOKEN, MULTICALL3
 src/logger.py          rich + JSONL (logs/run-YYYYMMDD.jsonl)
 src/db/                schema.sql, dao.py (thread-local sqlite, upsert-ы), models.py (статусы)
@@ -44,6 +45,9 @@ src/chains/multicall.py batch balanceOf через Multicall3 (0xcA11...CA11)
 src/chains/tokens.py   discovery: Relay currencies ⋂ Multicall3 (фильтр невалидных адресов!)
 src/core/steps.py      QUOTE/APPROVE/DEPOSIT/BRIDGE/TRANSFER (идемпотентные)
 src/core/pipeline.py   оркестратор: кошельки параллельно, изоляция ошибок, ротация прокси
+src/core/protocol_check.py оркестратор чекера: relay.link login -> AGW-адрес -> DeBank -> в БД (через прокси)
+src/debank/checker.py  Playwright-перехват API DeBank (project_list/cache_balance_list/used_chains) -> протоколы
+src/data_io/protocol_report.py экспорт отчёта по протоколам в Excel (листы protocols/summary/catalog)
 src/core/errors.py     Retryable/Proxy/Rpc/Permanent/NoRoute/DustSkip/Manual
 src/browser/           ЗАГЛУШКА fallback-ветки AdsPower+Playwright (PLAN.md §7)
 ```
@@ -82,6 +86,17 @@ src/browser/           ЗАГЛУШКА fallback-ветки AdsPower+Playwright 
       прогр. Base-EOA -> target). Сейчас логика в scratchpad/real_bridge.py + src/browser/.
 - [ ] Обобщить на ERC-20 (сейчас native ETH) и на несколько кошельков (профили/сессии).
 - [ ] Возможное расширение функционала (пользователь упоминал будущие доработки).
+
+## Чекер протоколов (DeBank) — как работает
+- Адрес для чека = AGW/Privy-адрес из входа на relay.link (relay_flow.login -> сохраняем wallets.agw_address).
+- DeBank API (api.debank.com) подписывается их JS -> прямой fetch НЕ работает ({} / 403). Решение:
+  Playwright перехватывает ОТВЕТЫ (page.on('response')) на portfolio/project_list, token/cache_balance_list
+  (все чейны; token/balance_list — по одному), user/used_chains. DeBank грузится в свежем Playwright без
+  Cloudflare-блока. Проверено вживую на 0xF094..a671: протоколы Aborean Finance, Witty (chains op,abs).
+- Хранение: protocols (каталог, дедуп по debank_id, РАСТЁТ при новых протоколах) + wallet_protocols
+  (позиции кошелька, clear перед свежим чеком) + wallet_tokens_debank. Отчёт: reports/protocols_report.xlsx.
+- Один браузерный контекст на кошелёк (login + debank), persistent-профиль в data/.browser/<addr>
+  (Privy-сессия кэшируется -> повторный вход мгновенный: 'уже подключён').
 
 ## КРИТИЧНЫЕ уроки браузерной автоматизации relay.link (не переоткрывать)
 - Кнопка SWAP: accessible name = 'Swap' (визуально SWAP через CSS uppercase), ТАКОЙ ЖЕ у стрелки

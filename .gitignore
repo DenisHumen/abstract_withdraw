@@ -4,7 +4,9 @@ data/wallets.xlsx
 data/proxies.txt
 data/state.db
 data/state.db-*
+data/.browser/
 logs/
+reports/protocols_report.xlsx
 
 # Временные lock-файлы Excel/Office
 ~$*

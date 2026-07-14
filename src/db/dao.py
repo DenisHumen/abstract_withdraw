@@ -22,6 +22,15 @@ class Dao:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn().executescript(_SCHEMA.read_text(encoding="utf-8"))
         self._conn().commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Лёгкие миграции для существующих БД (CREATE IF NOT EXISTS не добавляет колонки)."""
+        c = self._conn()
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(wallets)").fetchall()}
+        if "agw_address" not in cols:
+            c.execute("ALTER TABLE wallets ADD COLUMN agw_address TEXT")
+            c.commit()
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -130,6 +139,7 @@ class Dao:
 
     @staticmethod
     def _wallet_from(r: sqlite3.Row) -> Wallet:
+        keys = r.keys()
         return Wallet(
             id=r["id"],
             address=r["address"],
@@ -140,6 +150,7 @@ class Dao:
             adspower_profile=r["adspower_profile"],
             label=r["label"],
             enabled=bool(r["enabled"]),
+            agw_address=r["agw_address"] if "agw_address" in keys else None,
         )
 
     def set_wallet_proxy(self, wallet_id: int, proxy: str, source: str, status: str = "unknown") -> None:
@@ -156,6 +167,99 @@ class Dao:
             "UPDATE wallets SET proxy_status=?, updated_at=? WHERE id=?", (status, _now(), wallet_id)
         )
         c.commit()
+
+    def set_wallet_agw(self, wallet_id: int, agw_address: str) -> None:
+        c = self._conn()
+        c.execute(
+            "UPDATE wallets SET agw_address=?, updated_at=? WHERE id=?", (agw_address, _now(), wallet_id)
+        )
+        c.commit()
+
+    # ---------- protocols (каталог + использование) ----------
+
+    def upsert_protocol(self, debank_id: str, name: str | None, chain: str | None, site_url: str | None) -> int:
+        c = self._conn()
+        now = _now()
+        c.execute(
+            """
+            INSERT INTO protocols(debank_id, name, chain, site_url, first_seen, last_seen)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(debank_id) DO UPDATE SET
+              name=excluded.name, chain=excluded.chain, site_url=excluded.site_url, last_seen=excluded.last_seen
+            """,
+            (debank_id, name, chain, site_url, now, now),
+        )
+        c.commit()
+        row = c.execute("SELECT id FROM protocols WHERE debank_id=?", (debank_id,)).fetchone()
+        return int(row["id"])
+
+    def upsert_wallet_protocol(
+        self,
+        wallet_id: int,
+        protocol_id: int,
+        agw_address: str | None,
+        chain: str | None,
+        net_usd: float,
+        item_types: list[str],
+        raw: str | None,
+    ) -> None:
+        c = self._conn()
+        c.execute(
+            """
+            INSERT INTO wallet_protocols(wallet_id, protocol_id, agw_address, chain, net_usd, item_types, raw, checked_at)
+            VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(wallet_id, protocol_id) DO UPDATE SET
+              agw_address=excluded.agw_address, chain=excluded.chain, net_usd=excluded.net_usd,
+              item_types=excluded.item_types, raw=excluded.raw, checked_at=excluded.checked_at
+            """,
+            (wallet_id, protocol_id, agw_address, chain, str(net_usd), ",".join(item_types), raw, _now()),
+        )
+        c.commit()
+
+    def upsert_wallet_token_debank(
+        self, wallet_id: int, chain: str, symbol: str, amount: float, usd_value: float
+    ) -> None:
+        c = self._conn()
+        c.execute(
+            """
+            INSERT INTO wallet_tokens_debank(wallet_id, chain, symbol, amount, usd_value, checked_at)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(wallet_id, chain, symbol) DO UPDATE SET
+              amount=excluded.amount, usd_value=excluded.usd_value, checked_at=excluded.checked_at
+            """,
+            (wallet_id, chain, symbol, str(amount), str(usd_value), _now()),
+        )
+        c.commit()
+
+    def clear_wallet_protocols(self, wallet_id: int) -> None:
+        """Перед свежим чеком очищаем прошлые позиции кошелька (протоколы могли исчезнуть)."""
+        c = self._conn()
+        c.execute("DELETE FROM wallet_protocols WHERE wallet_id=?", (wallet_id,))
+        c.execute("DELETE FROM wallet_tokens_debank WHERE wallet_id=?", (wallet_id,))
+        c.commit()
+
+    def protocol_catalog(self) -> list[sqlite3.Row]:
+        return self._conn().execute(
+            "SELECT * FROM protocols ORDER BY chain, name"
+        ).fetchall()
+
+    def protocol_report_rows(self) -> list[sqlite3.Row]:
+        return self._conn().execute(
+            """
+            SELECT w.address, w.label, w.agw_address, p.name AS protocol, p.chain,
+                   wp.item_types, wp.net_usd, wp.checked_at
+            FROM wallet_protocols wp
+            JOIN wallets w  ON w.id = wp.wallet_id
+            JOIN protocols p ON p.id = wp.protocol_id
+            ORDER BY w.id, p.chain, p.name
+            """
+        ).fetchall()
+
+    def wallet_protocol_count(self, wallet_id: int) -> int:
+        row = self._conn().execute(
+            "SELECT COUNT(*) AS n FROM wallet_protocols WHERE wallet_id=?", (wallet_id,)
+        ).fetchone()
+        return int(row["n"])
 
     # ---------- token_balances ----------
 

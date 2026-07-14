@@ -34,6 +34,7 @@ class Wallet:
     adspower_profile: str | None
     label: str | None
     enabled: bool
+    agw_address: str | None = None  # Privy/AGW-адрес, получен при входе на relay.link
     # приватный ключ живёт только в памяти процесса (из XLSX), в БД не пишется
     private_key: str | None = None
 
