@@ -40,8 +40,9 @@ python -m venv .venv
 .\.venv\Scripts\python -m src.main
 
 # чекер протоколов: вход на relay.link -> AGW-адрес -> DeBank -> Excel-отчёт
-.\.venv\Scripts\python -m src.main check-protocols
-.\.venv\Scripts\python -m src.main report-protocols   # только перегенерировать Excel из БД
+.\.venv\Scripts\python -m src.main check-protocols               # потоков из config
+.\.venv\Scripts\python -m src.main check-protocols --threads 4   # 4 кошелька параллельно (фаза DeBank)
+.\.venv\Scripts\python -m src.main report-protocols              # только перегенерировать Excel из БД
 ```
 
 ## Чекер протоколов (DeBank)
@@ -53,6 +54,13 @@ python -m venv .venv
 4. по завершении сохраняем `reports/protocols_report.xlsx` (листы: protocols / summary / catalog).
 
 Браузер использует прокси кошелька; Privy-сессия кэшируется в `data/.browser/<addr>` (повторный вход мгновенный).
+
+**Многопоточность** (`--threads N` или `execution.check_concurrency`): проверка идёт в два этапа —
+(1) вход на relay.link и получение AGW-адресов выполняется **последовательно** (тяжёлый Privy-SPA не
+терпит параллельных браузеров), причём кошельки с уже сохранённым адресом этот этап пропускают;
+(2) сама проверка на DeBank (публичные страницы, логин не нужен) идёт **параллельно** в N потоков.
+Итог: первый прогон делает входы по очереди + DeBank параллельно; повторные прогоны (адреса в БД) —
+полностью параллельны и быстры. В Excel-отчёте кошельки визуально разделены (заливка групп + рамка).
 
 ## Формат data/wallets.xlsx
 

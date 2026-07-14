@@ -69,6 +69,7 @@ class AmountsCfg(BaseModel):
 
 class ExecutionCfg(BaseModel):
     concurrency: int = 3
+    check_concurrency: int = 3      # потоков для чекера протоколов (браузерных сессий параллельно)
     quote_ttl_sec: int = 30
     status_poll_interval_sec: int = 2
     status_timeout_sec: int = 900

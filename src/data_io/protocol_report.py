@@ -11,10 +11,13 @@ from src.db.dao import Dao
 from src import logger
 
 _thin = Side(style="thin", color="B0B0B0")
+_sep = Side(style="medium", color="2F5496")   # толстая линия-разделитель между кошельками
 _BORDER = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
 _HEAD_FILL = PatternFill("solid", start_color="2F5496")
 _HEAD_FONT = Font(name="Arial", size=10, bold=True, color="FFFFFF")
 _BODY = Font(name="Arial", size=10)
+# чередующиеся заливки групп-кошельков (для визуального разделения)
+_BANDS = (PatternFill("solid", start_color="FFFFFF"), PatternFill("solid", start_color="E9F0FB"))
 
 
 def _style_header(ws, ncols: int) -> None:
@@ -43,10 +46,22 @@ def export_protocol_report(dao: Dao, out_path: Path) -> Path:
             r["item_types"] or "", _num(r["net_usd"]),
             _short_ts(r["checked_at"]),
         ])
-    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=len(headers)):
+    # Разделение по кошелькам: чередующаяся заливка на группу + толстая линия сверху при смене кошелька.
+    prev_addr = None
+    group_idx = -1
+    for i, (row, r) in enumerate(zip(ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=len(headers)), rows)):
+        addr = r["address"]
+        new_group = addr != prev_addr
+        if new_group:
+            group_idx += 1
+            prev_addr = addr
+        fill = _BANDS[group_idx % 2]
         for cell in row:
             cell.font = _BODY
-            cell.border = _BORDER
+            cell.fill = fill
+            # первая строка нового кошелька (кроме самой первой) — толстая верхняя граница-разделитель
+            top = _sep if (new_group and i > 0) else _thin
+            cell.border = Border(left=_thin, right=_thin, top=top, bottom=_thin)
             cell.alignment = Alignment(vertical="center")
         row[6].number_format = "$#,##0.00"
     widths = [46, 16, 46, 22, 8, 24, 12, 20]

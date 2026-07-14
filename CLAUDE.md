@@ -94,9 +94,21 @@ src/browser/           ЗАГЛУШКА fallback-ветки AdsPower+Playwright 
   (все чейны; token/balance_list — по одному), user/used_chains. DeBank грузится в свежем Playwright без
   Cloudflare-блока. Проверено вживую на 0xF094..a671: протоколы Aborean Finance, Witty (chains op,abs).
 - Хранение: protocols (каталог, дедуп по debank_id, РАСТЁТ при новых протоколах) + wallet_protocols
-  (позиции кошелька, clear перед свежим чеком) + wallet_tokens_debank. Отчёт: reports/protocols_report.xlsx.
-- Один браузерный контекст на кошелёк (login + debank), persistent-профиль в data/.browser/<addr>
-  (Privy-сессия кэшируется -> повторный вход мгновенный: 'уже подключён').
+  (позиции кошелька, clear перед свежим чеком) + wallet_tokens_debank. Отчёт: reports/protocols_report.xlsx
+  (в отчёте кошельки разделены: чередующаяся заливка групп + толстая линия между кошельками).
+
+## Многопоточность чекера — ДВА ЭТАПА (важно, не ломать)
+- **Вход на relay.link НЕ параллелится**: 2+ одновременных браузера + тяжёлый Privy shadow-DOM SPA
+  на одной машине -> клики по Abstract таймаутят (проверено: single OK, 2 parallel — оба падают).
+- Поэтому `ProtocolChecker.run` — ДВА этапа:
+  1) **Фаза 1 (последовательно)**: `ensure_agw` — вход на relay.link, получаем AGW, сохраняем в БД.
+     Кошельки с уже сохранённым `agw_address` вход ПРОПУСКАЮТ -> повторные прогоны сразу в фазу 2.
+  2) **Фаза 2 (параллельно, --threads / execution.check_concurrency)**: `debank_check` — открываем
+     debank.com/profile/<agw> БЕЗ логина (публичная страница!), перехватываем протоколы. Логин не нужен ->
+     потоки безопасны (проверено: 2 параллельных DeBank-чека работают).
+- Анти-троттлинг args обязательны (фон. окна Chrome душит рендер). Зомби-процессы Chromium от упавших
+  прогонов копятся и грузят машину -> при отладке чистить: Stop-Process chrome.exe с CommandLine *ms-playwright*.
+- persistent-профиль в data/.browser/<addr> (кэш Privy-сессии -> повторный вход мгновенный 'уже подключён').
 
 ## КРИТИЧНЫЕ уроки браузерной автоматизации relay.link (не переоткрывать)
 - Кнопка SWAP: accessible name = 'Swap' (визуально SWAP через CSS uppercase), ТАКОЙ ЖЕ у стрелки

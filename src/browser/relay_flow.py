@@ -42,7 +42,7 @@ def _click_first(page: Page, names: list[str], timeout: int = 4000) -> str | Non
 def login(page: Page, context: BrowserContext, timeout_ms: int = 60000) -> LoginResult:
     """Полный вход как AGW. Наш инжект-провайдер должен быть уже установлен в контексте."""
     page.goto(RELAY_BRIDGE_URL, wait_until="domcontentloaded")
-    page.wait_for_timeout(5000)
+    page.wait_for_timeout(2000)
 
     # уже подключены?
     agw = _read_connected_agw(page)
@@ -50,15 +50,37 @@ def login(page: Page, context: BrowserContext, timeout_ms: int = 60000) -> Login
         logger.info(f"уже подключён AGW {agw[:10]}", step="BROWSER")
         return LoginResult(agw, True)
 
-    # Connect
-    try:
-        page.get_by_role("button", name="Connect", exact=False).first.click(timeout=8000)
-    except Exception:
-        page.get_by_text("Connect", exact=False).first.click(timeout=8000)
+    # Ждём готовности SPA и жмём Connect. Устойчиво к медленному рендеру при параллельном запуске:
+    # ждём появления кнопки Connect до ~40с, а не фиксированную паузу.
+    connected = False
+    for _ in range(40):
+        agw = _read_connected_agw(page)
+        if agw:
+            return LoginResult(agw, True)
+        try:
+            btn = page.get_by_role("button", name="Connect", exact=False)
+            if btn.count() > 0:
+                btn.first.click(timeout=4000)
+                connected = True
+                break
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    if not connected:
+        logger.warn("кнопка Connect не появилась", step="BROWSER")
+        return LoginResult(None, False)
     page.wait_for_timeout(3000)
 
     # выбрать Abstract и дождаться попапа Privy; UI флейков -> ретраим клик, пока попап не откроется
     modal = page.locator("[data-testid='dynamic-modal']")
+    # ждём появления модалки/поиска (устойчиво к медленному рендеру под нагрузкой)
+    for _ in range(15):
+        try:
+            if modal.get_by_placeholder("Search through", exact=False).count() > 0:
+                break
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
     try:
         modal.get_by_placeholder("Search through", exact=False).fill("Abstract", timeout=6000)
         page.wait_for_timeout(2000)
@@ -66,7 +88,7 @@ def login(page: Page, context: BrowserContext, timeout_ms: int = 60000) -> Login
         pass
 
     privy = None
-    for attempt in range(4):
+    for attempt in range(6):
         clicked = False
         for loc in [
             page.get_by_text("Abstract", exact=True),          # .last = строка в модалке (проверено в PoC)

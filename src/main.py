@@ -175,14 +175,15 @@ def retry(
 @app.command("check-protocols")
 def check_protocols(
     wallet: str = typer.Option(None, help="только этот адрес"),
-    headless: bool = typer.Option(False, help="скрытый браузер (не рекомендуется для Privy)"),
+    threads: int = typer.Option(None, "--threads", "-t", help="кошельков параллельно (по умолчанию из config)"),
+    headless: bool = typer.Option(True, help="скрытый браузер (рекомендуется, особенно при потоках)"),
     report: bool = typer.Option(True, help="сохранить Excel-отчёт по завершении"),
     config: str = typer.Option(None),
 ):
-    """Проверить, какие протоколы использует каждый кошелёк (relay.link login -> DeBank)."""
+    """Проверить, какие протоколы использует каждый кошелёк (relay.link login -> DeBank). Многопоточно."""
     cfg, dao = _boot(config)
     keys = excel.sync_to_db(cfg.resolve(cfg.paths.wallets_xlsx), dao)
-    ProtocolChecker(cfg, dao, keys).run(only_wallet=wallet, headless=headless)
+    ProtocolChecker(cfg, dao, keys).run(only_wallet=wallet, headless=headless, threads=threads)
     if report:
         export_protocol_report(dao, cfg.resolve(REPORT_PROTOCOLS))
 
@@ -239,7 +240,10 @@ def _dispatch(action: str | None, cfg: AppConfig, dao: Dao) -> None:
         excel.sync_to_db(cfg.resolve(cfg.paths.wallets_xlsx), dao)
     elif action == "check":
         keys = excel.sync_to_db(cfg.resolve(cfg.paths.wallets_xlsx), dao)
-        ProtocolChecker(cfg, dao, keys).run()
+        default_t = cfg.execution.check_concurrency
+        raw = input(f"  потоков [{default_t}]: ").strip()
+        threads = int(raw) if raw.isdigit() and int(raw) > 0 else default_t
+        ProtocolChecker(cfg, dao, keys).run(threads=threads)
         export_protocol_report(dao, cfg.resolve(REPORT_PROTOCOLS))
     elif action == "run":
         keys = excel.sync_to_db(cfg.resolve(cfg.paths.wallets_xlsx), dao)

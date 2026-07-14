@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import json
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -47,48 +47,62 @@ class ProtocolChecker:
         self.profiles_dir = cfg.resolve("data/.browser")
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
 
-    def check_wallet(self, wallet: Wallet, headless: bool = False) -> dict:
+    _ANTI_THROTTLE = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-features=CalculateNativeWinOcclusion",
+    ]
+
+    # ---- Фаза 1: получить AGW-адрес входом на relay.link (ТЯЖЁЛО, выполняем последовательно) ----
+
+    def ensure_agw(self, wallet: Wallet, headless: bool = True) -> str | None:
+        """Вернуть AGW-адрес: из БД (если уже есть) либо войти на relay.link и сохранить.
+        Вход heavy (Privy shadow-DOM) и не терпит параллельных браузеров -> зовём последовательно."""
+        if wallet.agw_address:
+            return wallet.agw_address
         pk = self.keys.get(wallet.address)
         if not pk:
             raise ManualError(f"нет приватного ключа для {wallet.address}")
         addr, inject_js, signer = make_injector(pk)
         proxy = _playwright_proxy(wallet.proxy)
         profile = self.profiles_dir / addr.lower()
-
-        logger.info("старт проверки", wallet=wallet.address, step="CHECK",
-                    proxy="on" if proxy else "off")
-
+        logger.info("вход на relay.link ...", wallet=wallet.address, step="LOGIN", proxy="on" if proxy else "off")
         with sync_playwright() as p:
             ctx = p.chromium.launch_persistent_context(
-                user_data_dir=str(profile),
-                headless=headless,
-                proxy=proxy,
-                args=["--disable-blink-features=AutomationControlled"],
-                viewport={"width": 1280, "height": 900},
+                user_data_dir=str(profile), headless=headless, proxy=proxy,
+                args=self._ANTI_THROTTLE, viewport={"width": 1280, "height": 900},
             )
             ctx.expose_binding("__walletSign", lambda source, arg: signer(arg))
             ctx.add_init_script(inject_js)
             ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>false});")
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
-
-            # 1) вход -> AGW-адрес
             login = relay_flow.login(page, ctx)
-            if not login.ok or not login.agw_address:
-                ctx.close()
-                raise ManualError("не удалось войти на relay.link / получить AGW-адрес")
-            agw = login.agw_address
-            self.dao.set_wallet_agw(wallet.id, agw)
-            logger.ok(f"AGW-адрес получен: {agw}", wallet=wallet.address, step="CHECK")
+            ctx.close()
+        if not login.ok or not login.agw_address:
+            raise ManualError("не удалось войти на relay.link / получить AGW-адрес")
+        self.dao.set_wallet_agw(wallet.id, login.agw_address)
+        logger.ok(f"AGW-адрес: {login.agw_address}", wallet=wallet.address, step="LOGIN")
+        return login.agw_address
 
-            # 2) DeBank
-            from src.debank.checker import check_debank
+    # ---- Фаза 2: DeBank-проверка по AGW-адресу (ЛЕГКО, публичная страница -> параллелим) ----
+
+    def debank_check(self, wallet: Wallet, agw: str, headless: bool = True) -> None:
+        """Открыть debank.com/profile/<agw> (без логина!) и сохранить протоколы. Параллель-безопасно."""
+        from src.debank.checker import check_debank
+
+        proxy = _playwright_proxy(wallet.proxy)
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=headless, args=self._ANTI_THROTTLE)
+            ctx = browser.new_context(proxy=proxy, viewport={"width": 1280, "height": 900})
+            ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>false});")
+            page = ctx.new_page()
             res = check_debank(page, agw)
             ctx.close()
-
+            browser.close()
         if not res.ok:
-            raise ManualError("DeBank не отдал данные (возможен антибот/пустой профиль)")
-
-        # 3) сохранение
+            raise ManualError("DeBank не отдал данные (антибот/пустой профиль)")
         self.dao.clear_wallet_protocols(wallet.id)
         for pr in res.protocols:
             pid = self.dao.upsert_protocol(pr.debank_id, pr.name, pr.chain, pr.raw.get("site_url"))
@@ -98,17 +112,21 @@ class ProtocolChecker:
             )
         for tk in res.tokens:
             self.dao.upsert_wallet_token_debank(wallet.id, tk.chain, tk.symbol, tk.amount, tk.usd_value)
-
-        summary = {
-            "agw": agw,
-            "protocols": [(pr.name, pr.chain, round(pr.net_usd, 2), ",".join(pr.item_types)) for pr in res.protocols],
-            "tokens": len(res.tokens),
-            "chains": res.used_chains,
-        }
         logger.print_protocols(wallet, agw, res)
-        return summary
 
-    def run(self, only_wallet: str | None = None, headless: bool = False) -> None:
+    def _debank_safe(self, wallet: Wallet, headless: bool) -> None:
+        try:
+            agw = wallet.agw_address or self.dao.get_wallet(wallet.address).agw_address  # type: ignore[union-attr]
+            if not agw:
+                logger.warn("нет AGW-адреса — пропуск DeBank", wallet=wallet.address, step="DEBANK")
+                return
+            self.debank_check(wallet, agw, headless=headless)
+        except ManualError as e:
+            logger.warn(f"пропуск: {e}", wallet=wallet.address, step="DEBANK")
+        except Exception as e:  # noqa: BLE001 — изоляция кошельков
+            logger.error(f"ошибка DeBank: {e}", wallet=wallet.address, step="DEBANK")
+
+    def run(self, only_wallet: str | None = None, headless: bool = True, threads: int | None = None) -> None:
         wallets = self.dao.get_wallets(enabled_only=True)
         if only_wallet:
             wallets = [w for w in wallets if w.address.lower() == only_wallet.lower()]
@@ -116,13 +134,38 @@ class ProtocolChecker:
         if not wallets:
             logger.warn("нет кошельков для проверки (sync?)")
             return
-        logger.info(f"проверка протоколов: {len(wallets)} кошельк(ов)")
-        for w in wallets:
-            try:
-                self.check_wallet(w, headless=headless)
-            except ManualError as e:
-                logger.warn(f"пропуск: {e}", wallet=w.address, step="CHECK")
-            except Exception as e:  # noqa: BLE001 — изоляция кошельков
-                logger.error(f"ошибка проверки: {e}", wallet=w.address, step="CHECK")
-            time.sleep(self.cfg.execution.random_delay())
+
+        n_threads = max(1, threads or self.cfg.execution.check_concurrency)
+        n_threads = min(n_threads, len(wallets))
+
+        # --- Фаза 1: последовательно получаем AGW-адреса (вход heavy, параллель ломает relay.link).
+        #     Кошельки с уже сохранённым agw_address вход пропускают -> повторные прогоны идут сразу в фазу 2.
+        need_login = [w for w in wallets if not w.agw_address]
+        if need_login:
+            logger.info(f"фаза 1: вход и получение AGW для {len(need_login)} кошельк(ов) (последовательно)")
+            for w in need_login:
+                try:
+                    self.ensure_agw(w, headless=headless)
+                except ManualError as e:
+                    logger.warn(f"пропуск входа: {e}", wallet=w.address, step="LOGIN")
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"ошибка входа: {e}", wallet=w.address, step="LOGIN")
+
+        # перечитываем кошельки (agw_address теперь проставлен)
+        wallets = [self.dao.get_wallet(w.address) for w in wallets]
+        ready = [w for w in wallets if w and w.agw_address]
+        if not ready:
+            logger.warn("ни у одного кошелька нет AGW-адреса — DeBank-проверка пропущена")
+            return
+
+        # --- Фаза 2: DeBank-проверка параллельно (публичные страницы, логин не нужен -> потоки безопасны).
+        logger.info(f"фаза 2: DeBank-проверка {len(ready)} кошельк(ов), потоков={n_threads}")
+        if n_threads == 1:
+            for w in ready:
+                self._debank_safe(w, headless)
+        else:
+            with ThreadPoolExecutor(max_workers=n_threads) as pool:
+                futures = [pool.submit(self._debank_safe, w, headless) for w in ready]
+                for _ in as_completed(futures):
+                    pass
         logger.ok("проверка протоколов завершена")

@@ -22,7 +22,8 @@ amounts:
   skip_if_out_lte_forward_gas: true
 
 execution:
-  concurrency: 3                  # кошельков параллельно
+  concurrency: 3                  # кошельков параллельно (мост/пайплайн)
+  check_concurrency: 3            # потоков чекера протоколов (браузеров параллельно); переопределяется --threads
   quote_ttl_sec: 30               # переквотить, если протухла
   status_poll_interval_sec: 2
   status_timeout_sec: 900         # ожидание bridge, сек
