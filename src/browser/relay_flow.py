@@ -73,14 +73,22 @@ def login(page: Page, context: BrowserContext, timeout_ms: int = 60000) -> Login
 
     # выбрать Abstract и дождаться попапа Privy; UI флейков -> ретраим клик, пока попап не откроется
     modal = page.locator("[data-testid='dynamic-modal']")
-    # ждём появления модалки/поиска (устойчиво к медленному рендеру под нагрузкой)
-    for _ in range(15):
+    # Модалка Dynamic (список кошельков) через прокси грузится МЕДЛЕННО — до минуты (со слов пользователя,
+    # Cloudflare пропускает, но долго). Ждём появления поля поиска до ~60с; только если и через минуту
+    # не подгрузилось — считаем прокси непригодной и ротируем (см. ensure_agw).
+    populated = False
+    for _ in range(60):
         try:
             if modal.get_by_placeholder("Search through", exact=False).count() > 0:
+                populated = True
                 break
         except Exception:
             pass
         page.wait_for_timeout(1000)
+    if not populated:
+        logger.warn("модалка кошельков не загрузилась за 60с — ротация прокси", step="BROWSER")
+        return LoginResult(None, False)
+    logger.info("модалка кошельков загрузилась", step="BROWSER")
     try:
         modal.get_by_placeholder("Search through", exact=False).fill("Abstract", timeout=6000)
         page.wait_for_timeout(2000)
@@ -101,7 +109,8 @@ def login(page: Page, context: BrowserContext, timeout_ms: int = 60000) -> Login
             except Exception:
                 continue
         logger.info(f"Abstract клик попытка {attempt + 1}: {'ok' if clicked else 'fail'}", step="BROWSER")
-        privy = _wait_for_privy_popup(context, 12000)
+        # Privy cross-app popup через прокси открывается небыстро -> ждём щедро (до ~20с на попытку)
+        privy = _wait_for_privy_popup(context, 20000)
         if privy:
             break
         page.wait_for_timeout(1500)
@@ -113,7 +122,8 @@ def login(page: Page, context: BrowserContext, timeout_ms: int = 60000) -> Login
     # драйвим попап тем же приоритетом кнопок, что и в проверенном PoC:
     # Continue with a wallet -> MetaMask -> (наш SIWE) -> Approve. Каждую итерацию просто
     # кликаем первую доступную кнопку из списка (Approve появится на экране согласия).
-    for _ in range(10):
+    # 16 итераций x ~2.5с — попап через прокси реагирует медленно.
+    for _ in range(16):
         if privy.is_closed():
             break
         privy.wait_for_timeout(2500)

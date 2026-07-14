@@ -9,10 +9,9 @@
 from __future__ import annotations
 
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-
-import httpx
 
 from playwright.sync_api import sync_playwright
 
@@ -79,27 +78,15 @@ class ProtocolChecker:
             ctx.close()
         return login.agw_address if login.ok else None
 
-    @staticmethod
-    def _relay_blocked(proxy_str: str | None) -> bool:
-        """True, если relay.link (фронтенд) недоступен через прокси (Cloudflare 429/403/503).
-        Датацентр-прокси часто блокируются Cloudflare на relay.link, хотя Privy/DeBank работают."""
-        if not proxy_str:
-            return False
-        ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
-        try:
-            with httpx.Client(proxy=proxy_str, timeout=10, headers={"User-Agent": ua}) as c:
-                return c.get("https://relay.link/").status_code in (403, 429, 503)
-        except Exception:  # noqa: BLE001 — недоступна -> считаем непригодной для входа
-            return True
-
-    def ensure_agw(self, wallet: Wallet, headless: bool = True) -> str | None:
+    def ensure_agw(self, wallet: Wallet) -> str | None:
         """Вернуть AGW-адрес: из БД (если уже есть) либо войти на relay.link и сохранить.
 
-        relay.link часто блокирует датацентр-прокси Cloudflare'ом (429) -> вход через прокси
-        невозможен. Поэтому: если прокси заблокирована на relay.link — входим НАПРЯМУЮ (без прокси).
-        Вход read-only (только адрес), on-chain-действий нет. Фаза DeBank идёт через прокси как обычно.
-        Вход heavy -> вызываем последовательно (фаза 1)."""
+        КРИТИЧНО: вход ТОЛЬКО headful. Cloudflare режет headless-браузер через датацентр-прокси
+        (headless -> 429/пустая модалка), а headful решает JS-челлендж и проходит — проверено вживую.
+        Часть прокси всё же не проходят Cloudflare даже headful -> РОТАЦИЯ: пробуем свою прокси, затем
+        случайные из пула, пока вход не удастся (httpx-health-check НЕ используем — он даёт 429 даже на
+        рабочих в браузере прокси, т.е. вводит в заблуждение). Вход read-only (только адрес).
+        Вход heavy+headful -> последовательно (фаза 1); DeBank (фаза 2) — headless/параллельно."""
         if wallet.agw_address:
             return wallet.agw_address
         pk = self.keys.get(wallet.address)
@@ -107,30 +94,34 @@ class ProtocolChecker:
             raise ManualError(f"нет приватного ключа для {wallet.address}")
         _, inject_js, signer = make_injector(pk)
 
-        proxy_str = normalize_proxy(wallet.proxy) if self.cfg.proxy.enabled else None
-        use_proxy = proxy_str
-        if proxy_str and self._relay_blocked(proxy_str):
-            logger.warn("relay.link недоступен через прокси (Cloudflare) — вход напрямую",
-                        wallet=wallet.address, step="LOGIN")
-            use_proxy = None
+        # кандидаты: своя прокси + случайные из пула (некоторые не проходят Cloudflare -> ротируем)
+        candidates: list[str | None] = []
+        own = normalize_proxy(wallet.proxy) if self.cfg.proxy.enabled else None
+        if own:
+            candidates.append(own)
+        if self.cfg.proxy.enabled:
+            for _ in range(max(1, self.cfg.execution.login_proxy_tries)):
+                cand = self.proxy_pool.pick_random(exclude=None)
+                if cand and cand not in candidates:
+                    candidates.append(cand)
+        if not candidates:
+            candidates = [None]
 
-        # попытки: сначала выбранным способом; если через прокси не вышло — фолбэк напрямую
-        attempts = [use_proxy]
-        if use_proxy is not None:
-            attempts.append(None)
-        for i, px in enumerate(attempts):
-            logger.info(f"вход на relay.link ...", wallet=wallet.address, step="LOGIN",
-                        proxy="on" if px else "direct")
+        for i, proxy_str in enumerate(candidates):
+            logger.info(f"вход на relay.link (headful, прокси {i + 1}/{len(candidates)}) ...",
+                        wallet=wallet.address, step="LOGIN", proxy="on" if proxy_str else "off")
             try:
-                agw = self._try_login(wallet, inject_js, signer, px, headless, fresh=(i > 0))
+                agw = self._try_login(wallet, inject_js, signer, proxy_str, headless=False, fresh=(i > 0))
             except Exception as e:  # noqa: BLE001
                 logger.warn(f"вход упал: {str(e)[:60]}", wallet=wallet.address, step="LOGIN")
                 agw = None
             if agw:
                 self.dao.set_wallet_agw(wallet.id, agw)
+                if proxy_str and proxy_str != own and self.cfg.proxy.persist_assignment:
+                    self.dao.set_wallet_proxy(wallet.id, proxy_str, "pool", "ok")
                 logger.ok(f"AGW-адрес: {agw}", wallet=wallet.address, step="LOGIN")
                 return agw
-        raise ManualError("вход не удался (relay.link недоступен даже напрямую)")
+        raise ManualError(f"вход не удался (headful, {len(candidates)} прокси)")
 
     # ---- Фаза 2: DeBank-проверка по AGW-адресу (ЛЕГКО, публичная страница -> параллелим) ----
 
@@ -188,14 +179,18 @@ class ProtocolChecker:
         #     Кошельки с уже сохранённым agw_address вход пропускают -> повторные прогоны идут сразу в фазу 2.
         need_login = [w for w in wallets if not w.agw_address]
         if need_login:
-            logger.info(f"фаза 1: вход и получение AGW для {len(need_login)} кошельк(ов) (последовательно)")
-            for w in need_login:
+            logger.info(f"фаза 1: вход и получение AGW для {len(need_login)} кошельк(ов) "
+                        f"(последовательно, headful — откроются окна браузера; адреса кэшируются в БД)")
+            for idx, w in enumerate(need_login):
                 try:
-                    self.ensure_agw(w, headless=headless)
+                    self.ensure_agw(w)
                 except ManualError as e:
                     logger.warn(f"пропуск входа: {e}", wallet=w.address, step="LOGIN")
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"ошибка входа: {e}", wallet=w.address, step="LOGIN")
+                # пауза между входами -> не провоцируем рейт-лимит Cloudflare частыми входами с одного IP
+                if idx + 1 < len(need_login):
+                    time.sleep(self.cfg.execution.random_delay())
 
         # перечитываем кошельки (agw_address теперь проставлен)
         wallets = [self.dao.get_wallet(w.address) for w in wallets]
