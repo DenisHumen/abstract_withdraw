@@ -12,6 +12,8 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import httpx
+
 from playwright.sync_api import sync_playwright
 
 from src.browser import relay_flow
@@ -20,7 +22,7 @@ from src.config import AppConfig
 from src.core.errors import ManualError
 from src.db.dao import Dao
 from src.db.models import Wallet
-from src.net.proxy import normalize_proxy
+from src.net.proxy import ProxyPool, normalize_proxy
 from src import logger
 
 
@@ -46,6 +48,7 @@ class ProtocolChecker:
         self.keys = keys
         self.profiles_dir = cfg.resolve("data/.browser")
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
+        self.proxy_pool = ProxyPool(cfg.proxy, cfg.resolve(cfg.proxy.pool_file), dao)
 
     _ANTI_THROTTLE = [
         "--disable-blink-features=AutomationControlled",
@@ -57,21 +60,15 @@ class ProtocolChecker:
 
     # ---- Фаза 1: получить AGW-адрес входом на relay.link (ТЯЖЁЛО, выполняем последовательно) ----
 
-    def ensure_agw(self, wallet: Wallet, headless: bool = True) -> str | None:
-        """Вернуть AGW-адрес: из БД (если уже есть) либо войти на relay.link и сохранить.
-        Вход heavy (Privy shadow-DOM) и не терпит параллельных браузеров -> зовём последовательно."""
-        if wallet.agw_address:
-            return wallet.agw_address
-        pk = self.keys.get(wallet.address)
-        if not pk:
-            raise ManualError(f"нет приватного ключа для {wallet.address}")
-        addr, inject_js, signer = make_injector(pk)
-        proxy = _playwright_proxy(wallet.proxy)
-        profile = self.profiles_dir / addr.lower()
-        logger.info("вход на relay.link ...", wallet=wallet.address, step="LOGIN", proxy="on" if proxy else "off")
+    def _try_login(self, wallet: Wallet, inject_js: str, signer, proxy_str: str | None,
+                   headless: bool, fresh: bool) -> str | None:
+        """Одна попытка входа с конкретной прокси. Возвращает AGW-адрес или None.
+        fresh=True -> отдельный временный профиль (чтобы битая сессия от прошлой прокси не мешала)."""
+        profile = self.profiles_dir / (wallet.address.lower() if not fresh else f"{wallet.address.lower()}_t")
+        pw_proxy = _playwright_proxy(proxy_str)
         with sync_playwright() as p:
             ctx = p.chromium.launch_persistent_context(
-                user_data_dir=str(profile), headless=headless, proxy=proxy,
+                user_data_dir=str(profile), headless=headless, proxy=pw_proxy,
                 args=self._ANTI_THROTTLE, viewport={"width": 1280, "height": 900},
             )
             ctx.expose_binding("__walletSign", lambda source, arg: signer(arg))
@@ -80,11 +77,60 @@ class ProtocolChecker:
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             login = relay_flow.login(page, ctx)
             ctx.close()
-        if not login.ok or not login.agw_address:
-            raise ManualError("не удалось войти на relay.link / получить AGW-адрес")
-        self.dao.set_wallet_agw(wallet.id, login.agw_address)
-        logger.ok(f"AGW-адрес: {login.agw_address}", wallet=wallet.address, step="LOGIN")
-        return login.agw_address
+        return login.agw_address if login.ok else None
+
+    @staticmethod
+    def _relay_blocked(proxy_str: str | None) -> bool:
+        """True, если relay.link (фронтенд) недоступен через прокси (Cloudflare 429/403/503).
+        Датацентр-прокси часто блокируются Cloudflare на relay.link, хотя Privy/DeBank работают."""
+        if not proxy_str:
+            return False
+        ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+        try:
+            with httpx.Client(proxy=proxy_str, timeout=10, headers={"User-Agent": ua}) as c:
+                return c.get("https://relay.link/").status_code in (403, 429, 503)
+        except Exception:  # noqa: BLE001 — недоступна -> считаем непригодной для входа
+            return True
+
+    def ensure_agw(self, wallet: Wallet, headless: bool = True) -> str | None:
+        """Вернуть AGW-адрес: из БД (если уже есть) либо войти на relay.link и сохранить.
+
+        relay.link часто блокирует датацентр-прокси Cloudflare'ом (429) -> вход через прокси
+        невозможен. Поэтому: если прокси заблокирована на relay.link — входим НАПРЯМУЮ (без прокси).
+        Вход read-only (только адрес), on-chain-действий нет. Фаза DeBank идёт через прокси как обычно.
+        Вход heavy -> вызываем последовательно (фаза 1)."""
+        if wallet.agw_address:
+            return wallet.agw_address
+        pk = self.keys.get(wallet.address)
+        if not pk:
+            raise ManualError(f"нет приватного ключа для {wallet.address}")
+        _, inject_js, signer = make_injector(pk)
+
+        proxy_str = normalize_proxy(wallet.proxy) if self.cfg.proxy.enabled else None
+        use_proxy = proxy_str
+        if proxy_str and self._relay_blocked(proxy_str):
+            logger.warn("relay.link недоступен через прокси (Cloudflare) — вход напрямую",
+                        wallet=wallet.address, step="LOGIN")
+            use_proxy = None
+
+        # попытки: сначала выбранным способом; если через прокси не вышло — фолбэк напрямую
+        attempts = [use_proxy]
+        if use_proxy is not None:
+            attempts.append(None)
+        for i, px in enumerate(attempts):
+            logger.info(f"вход на relay.link ...", wallet=wallet.address, step="LOGIN",
+                        proxy="on" if px else "direct")
+            try:
+                agw = self._try_login(wallet, inject_js, signer, px, headless, fresh=(i > 0))
+            except Exception as e:  # noqa: BLE001
+                logger.warn(f"вход упал: {str(e)[:60]}", wallet=wallet.address, step="LOGIN")
+                agw = None
+            if agw:
+                self.dao.set_wallet_agw(wallet.id, agw)
+                logger.ok(f"AGW-адрес: {agw}", wallet=wallet.address, step="LOGIN")
+                return agw
+        raise ManualError("вход не удался (relay.link недоступен даже напрямую)")
 
     # ---- Фаза 2: DeBank-проверка по AGW-адресу (ЛЕГКО, публичная страница -> параллелим) ----
 
