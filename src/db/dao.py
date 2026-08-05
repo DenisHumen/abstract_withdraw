@@ -126,6 +126,9 @@ class Dao:
             )
             c.execute("DELETE FROM jobs WHERE wallet_id=?", (wid,))
             c.execute("DELETE FROM token_balances WHERE wallet_id=?", (wid,))
+            c.execute("DELETE FROM check_tasks WHERE wallet_id=?", (wid,))
+            c.execute("DELETE FROM wallet_protocols WHERE wallet_id=?", (wid,))
+            c.execute("DELETE FROM wallet_tokens_debank WHERE wallet_id=?", (wid,))
             c.execute("DELETE FROM wallets WHERE id=?", (wid,))
         c.commit()
         return len(ids)
@@ -178,6 +181,67 @@ class Dao:
             "UPDATE wallets SET agw_address=?, updated_at=? WHERE id=?", (agw_address, _now(), wallet_id)
         )
         c.commit()
+
+    def set_wallet_target(self, wallet_id: int, target_address: str) -> None:
+        """Подхват биржевого адреса, появившегося в XLSX (поллинг agw_bridge)."""
+        c = self._conn()
+        c.execute(
+            "UPDATE wallets SET target_address=?, updated_at=? WHERE id=?",
+            (target_address, _now(), wallet_id),
+        )
+        c.commit()
+
+    # ---------- check_tasks (две задачи чекера на кошелёк: get_agw, check_protocols) ----------
+
+    def ensure_check_task(self, wallet_id: int, task: str) -> None:
+        """Создать задачу чекера (PENDING), если её ещё нет. Существующий статус не трогаем."""
+        c = self._conn()
+        c.execute(
+            """
+            INSERT INTO check_tasks(wallet_id, task, status, updated_at)
+            VALUES(?,?, 'PENDING', ?)
+            ON CONFLICT(wallet_id, task) DO NOTHING
+            """,
+            (wallet_id, task, _now()),
+        )
+        c.commit()
+
+    def set_check_task(self, wallet_id: int, task: str, status: str, last_error: str | None = None) -> None:
+        """Проставить статус задачи чекера (upsert). last_error чистится при не-FAILED."""
+        c = self._conn()
+        c.execute(
+            """
+            INSERT INTO check_tasks(wallet_id, task, status, last_error, updated_at)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(wallet_id, task) DO UPDATE SET
+              status=excluded.status, last_error=excluded.last_error, updated_at=excluded.updated_at
+            """,
+            (wallet_id, task, status, last_error, _now()),
+        )
+        c.commit()
+
+    def get_check_task(self, wallet_id: int, task: str) -> str | None:
+        row = self._conn().execute(
+            "SELECT status FROM check_tasks WHERE wallet_id=? AND task=?", (wallet_id, task)
+        ).fetchone()
+        return row["status"] if row else None
+
+    def check_tasks_summary(self) -> list[sqlite3.Row]:
+        """Строки для отчёта: адрес, обе задачи со статусами, agw, счётчик протоколов."""
+        return self._conn().execute(
+            """
+            SELECT w.address, w.label, w.agw_address,
+                   MAX(CASE WHEN t.task='get_agw'          THEN t.status END) AS get_agw,
+                   MAX(CASE WHEN t.task='check_protocols'  THEN t.status END) AS check_protocols,
+                   MAX(CASE WHEN t.task='get_agw'          THEN t.last_error END) AS agw_error,
+                   MAX(CASE WHEN t.task='check_protocols'  THEN t.last_error END) AS proto_error,
+                   (SELECT COUNT(*) FROM wallet_protocols wp WHERE wp.wallet_id=w.id) AS n_protocols
+            FROM wallets w
+            LEFT JOIN check_tasks t ON t.wallet_id = w.id
+            GROUP BY w.id
+            ORDER BY w.id
+            """
+        ).fetchall()
 
     # ---------- protocols (каталог + использование) ----------
 

@@ -23,13 +23,17 @@ amounts:
 
 execution:
   concurrency: 3                  # кошельков параллельно (мост/пайплайн)
-  check_concurrency: 3            # потоков чекера протоколов (браузеров параллельно); переопределяется --threads
+  check_concurrency: 3            # потоков DeBank-проверок (headless, лёгкие); переопределяется --threads
+  login_concurrency: 2            # потоков входа relay.link (headful Chromium — ТЯЖЁЛЫЙ); --login-threads;
+                                  # если входы массово падают (модалка >60с) — уменьшите до 1
   login_proxy_tries: 8            # сколько прокси перебрать на вход relay.link (часть режет Cloudflare)
   quote_ttl_sec: 30               # переквотить, если протухла
   status_poll_interval_sec: 2
   status_timeout_sec: 900         # ожидание bridge, сек
   tx_confirmations: 1
   wallet_delay_sec: [3, 10]       # случайная пауза между кошельками (мягче к лимитам)
+  login_delay_sec: [15, 30]       # пауза между входами В ОДНОМ login-потоке (анти-рейтлимит Cloudflare)
+  target_poll_interval_sec: 30    # ожидание биржевого адреса: перечитывать XLSX каждые N сек
 
 rpc:
   rotate_on_failure: true
@@ -56,6 +60,7 @@ proxy:
 
 tokens:
   discovery: relay_currencies_plus_onchain   # Relay /currencies/v1 ⋂ Multicall3 balanceOf
+  native_only: true               # мост работает ТОЛЬКО с native ETH (сканирование прочих токенов отключено)
   include_native_eth: true
   verified_only: false            # true = только verified из Relay-списка (меньше скама)
   use_external_search: false

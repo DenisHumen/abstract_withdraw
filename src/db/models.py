@@ -22,6 +22,13 @@ ENTRY_STATUSES = {"PENDING", "DISCOVERED", "QUOTED", "APPROVED", "WAITING_TARGET
 # Ожидание внешнего условия (target_address) — ончейн-действий нет
 WAITING_TARGET = "WAITING_TARGET"
 
+# ---- Чекер протоколов: ДВЕ задачи на кошелёк (см. check_tasks) ----
+TASK_GET_AGW = "get_agw"                 # 1) получить Privy/AGW-адрес входом на relay.link
+TASK_CHECK_PROTOCOLS = "check_protocols"  # 2) проверить протоколы на DeBank
+CHECK_TASKS = (TASK_GET_AGW, TASK_CHECK_PROTOCOLS)
+# Статусы задач чекера
+CHECK_PENDING, CHECK_RUNNING, CHECK_DONE, CHECK_FAILED = "PENDING", "RUNNING", "DONE", "FAILED"
+
 
 @dataclass
 class Wallet:

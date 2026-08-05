@@ -108,10 +108,16 @@ class Pipeline:
             base_eth=f"{base_balance / 1e18:.6f}",
         )
 
-        # DISCOVER
-        tokens = discover_tokens(
-            ctx.abstract.w3, ctx.relay, wallet.address, self.cfg.routing.origin_chain_id, self.cfg.tokens
-        )
+        # DISCOVER. native_only=true (по ТЗ): единственная цель моста — native ETH,
+        # сканирование ERC-20 отключено (не перебираем скам-токены с 'маршрута нет — пропуск').
+        if self.cfg.tokens.native_only:
+            tokens = [DiscoveredToken(NATIVE_TOKEN, "ETH", 18, abs_balance, True)] if abs_balance > 0 else []
+            logger.info("режим native-only: мостим только ETH, ERC-20 не сканируем",
+                        wallet=wallet.address, step="DISCOVER")
+        else:
+            tokens = discover_tokens(
+                ctx.abstract.w3, ctx.relay, wallet.address, self.cfg.routing.origin_chain_id, self.cfg.tokens
+            )
         if abs_balance == 0 and not tokens:
             logger.warn(
                 "на EOA Abstract пусто. Если средства в AGW-кошельке — нужен браузерный fallback (PLAN.md §7)",
@@ -247,9 +253,10 @@ class Pipeline:
 
         logger.info(f"запуск: {len(wallets)} кошельков, concurrency={self.cfg.execution.concurrency}, dry_run={dry_run}")
         if self.cfg.execution.concurrency <= 1 or len(wallets) == 1:
-            for w in wallets:
+            for i, w in enumerate(wallets):
                 self.process_wallet(w, dry_run)
-                time.sleep(self.cfg.execution.random_delay())
+                if i + 1 < len(wallets):  # после последнего пауза не нужна
+                    time.sleep(self.cfg.execution.random_delay())
         else:
             with ThreadPoolExecutor(max_workers=self.cfg.execution.concurrency) as pool:
                 futures = {}

@@ -148,10 +148,6 @@ def create_template(path: Path) -> None:
     ws = wb.active
     ws.title = "wallets"
     ws.append(COLUMNS)
-    # ширина колонок
-    widths = [46, 70, 46, 40, 18, 16, 9]
-    for col, width in zip("ABCDEFG", widths):
-        ws.column_dimensions[col].width = width
     # пример-подсказка (удалить перед боевым запуском)
     ws.append(
         [
@@ -165,7 +161,7 @@ def create_template(path: Path) -> None:
             "1",
         ]
     )
-    widths2 = [46, 70, 46, 46, 40, 18, 16, 9]
-    for col, width in zip("ABCDEFGH", widths2):
+    widths = [46, 70, 46, 46, 40, 18, 16, 9]  # по одной на колонку COLUMNS
+    for col, width in zip("ABCDEFGH", widths):
         ws.column_dimensions[col].width = width
     wb.save(path)

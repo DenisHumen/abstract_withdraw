@@ -116,10 +116,10 @@ class RelayClient:
         return self._request("GET", "/intents/status/v3", params={"requestId": request_id})
 
     def post_signature(self, endpoint: str, signature: str, body: dict | None = None, method: str = "POST") -> dict:
-        """kind=signature: подпись отправляется на post.endpoint (query ?signature=...)."""
-        url = endpoint if endpoint.startswith("http") else endpoint
-        logger.info("отправка подписи в Relay", step="SIGNATURE", endpoint=url)
-        return self._request(method, url, params={"signature": signature}, content=json.dumps(body or {}))
+        """kind=signature: подпись отправляется на post.endpoint (query ?signature=...).
+        endpoint бывает и абсолютным, и относительным — httpx с base_url разруливает оба случая."""
+        logger.info("отправка подписи в Relay", step="SIGNATURE", endpoint=endpoint)
+        return self._request(method, endpoint, params={"signature": signature}, content=json.dumps(body or {}))
 
     def check_item(self, endpoint: str, method: str = "GET") -> dict:
         """Поллинг item.check-эндпоинта транзакционного шага."""

@@ -1,12 +1,15 @@
-"""CLI: sync / discover / run / status / retry / init-data.
+"""CLI: sync / discover / run / status / retry / init-data / check-protocols / report-protocols.
 
+Запуск без команды — интерактивное меню.
 Примеры:
   python -m src.main init-data          # создать шаблоны data/wallets.xlsx и data/proxies.txt
   python -m src.main sync               # XLSX -> SQLite
   python -m src.main run --dry-run      # квоты без отправки транзакций
   python -m src.main run                # боевой прогон
-  python -m src.main status             # таблица прогресса
+  python -m src.main status             # таблица прогресса (мост + чекер)
   python -m src.main retry              # перезапуск FAILED-джобов
+  python -m src.main check-protocols    # чекер протоколов (вход -> AGW -> DeBank -> Excel)
+  python -m src.main report-protocols   # перегенерировать Excel-отчёт из БД
 """
 from __future__ import annotations
 
@@ -149,6 +152,22 @@ def _print_status(dao: Dao) -> None:
     logger.console.print(table)
     if not rows:
         logger.info("джобов пока нет: выполните sync и run")
+    _print_check_tasks_brief(dao)
+
+
+def _print_check_tasks_brief(dao: Dao) -> None:
+    """Компактная сводка задач чекера протоколов (если чекер запускался)."""
+    rows = [r for r in dao.check_tasks_summary() if r["get_agw"] or r["check_protocols"]]
+    if not rows:
+        return
+    agw_done = sum(1 for r in rows if r["get_agw"] == "DONE")
+    proto_done = sum(1 for r in rows if r["check_protocols"] == "DONE")
+    failed = sum(1 for r in rows if "FAILED" in (r["get_agw"], r["check_protocols"]))
+    logger.console.print(
+        f"  [bold]Чекер протоколов[/bold]: кошельков {len(rows)}  •  "
+        f"AGW получен: [green]{agw_done}[/green]  •  проверено на DeBank: [green]{proto_done}[/green]  •  "
+        f"с ошибками: [{'red' if failed else 'dim'}]{failed}[/]"
+    )
 
 
 @app.command()
@@ -172,18 +191,39 @@ def retry(
         Pipeline(cfg, dao, keys).run(only_wallet=wallet)
 
 
+@app.command("bridge-agw")
+def bridge_agw(
+    wallet: str = typer.Option(None, help="только этот адрес"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="показать план без браузера и транзакций"),
+    config: str = typer.Option(None),
+):
+    """Браузерный мост: native ETH AGW(Abstract) -> Base (свой EOA из ключа) -> биржевой адрес из XLSX.
+
+    Если биржевой адрес (target_address) не заполнен — после моста скрипт не падает, а ждёт:
+    перечитывает XLSX и отправляет, как только адрес появится.
+    """
+    from src.core.agw_bridge import AgwBridge
+
+    cfg, dao = _boot(config)
+    keys = excel.sync_to_db(cfg.resolve(cfg.paths.wallets_xlsx), dao)
+    AgwBridge(cfg, dao, keys).run(only_wallet=wallet, dry_run=dry_run or cfg.mode.dry_run)
+
+
 @app.command("check-protocols")
 def check_protocols(
     wallet: str = typer.Option(None, help="только этот адрес"),
-    threads: int = typer.Option(None, "--threads", "-t", help="кошельков параллельно (по умолчанию из config)"),
-    headless: bool = typer.Option(True, help="скрытый браузер (рекомендуется, особенно при потоках)"),
+    threads: int = typer.Option(None, "--threads", "-t", help="потоков DeBank-проверок (по умолчанию из config)"),
+    login_threads: int = typer.Option(None, "--login-threads", "-l",
+                                      help="потоков входа на relay.link (headful, тяжёлые; по умолчанию из config)"),
+    headless: bool = typer.Option(True, help="скрытый браузер для DeBank (вход всегда headful)"),
     report: bool = typer.Option(True, help="сохранить Excel-отчёт по завершении"),
     config: str = typer.Option(None),
 ):
     """Проверить, какие протоколы использует каждый кошелёк (relay.link login -> DeBank). Многопоточно."""
     cfg, dao = _boot(config)
     keys = excel.sync_to_db(cfg.resolve(cfg.paths.wallets_xlsx), dao)
-    ProtocolChecker(cfg, dao, keys).run(only_wallet=wallet, headless=headless, threads=threads)
+    ProtocolChecker(cfg, dao, keys).run(only_wallet=wallet, headless=headless,
+                                        threads=threads, login_threads=login_threads)
     if report:
         export_protocol_report(dao, cfg.resolve(REPORT_PROTOCOLS))
 
@@ -199,10 +239,11 @@ def report_protocols(config: str = typer.Option(None)):
 _MENU = [
     ("1", "Синхронизация XLSX -> БД", "sync"),
     ("2", "Проверка протоколов (DeBank)", "check"),
-    ("3", "Мост Abstract -> Base (EOA-путь)", "run"),
-    ("4", "Статус задач", "status"),
-    ("5", "Отчёт по протоколам -> Excel", "report"),
-    ("6", "Повтор упавших задач", "retry"),
+    ("3", "Мост через браузер: ETH AGW -> Base -> биржа", "bridge_agw"),
+    ("4", "Мост Abstract -> Base (EOA-путь, программный)", "run"),
+    ("5", "Статус задач", "status"),
+    ("6", "Отчёт по протоколам -> Excel", "report"),
+    ("7", "Повтор упавших задач", "retry"),
     ("0", "Выход", "quit"),
 ]
 
@@ -241,10 +282,18 @@ def _dispatch(action: str | None, cfg: AppConfig, dao: Dao) -> None:
     elif action == "check":
         keys = excel.sync_to_db(cfg.resolve(cfg.paths.wallets_xlsx), dao)
         default_t = cfg.execution.check_concurrency
-        raw = input(f"  потоков [{default_t}]: ").strip()
+        default_l = cfg.execution.login_concurrency
+        raw = input(f"  потоков DeBank [{default_t}]: ").strip()
         threads = int(raw) if raw.isdigit() and int(raw) > 0 else default_t
-        ProtocolChecker(cfg, dao, keys).run(threads=threads)
+        raw = input(f"  потоков входа (headful, тяжёлые) [{default_l}]: ").strip()
+        login_threads = int(raw) if raw.isdigit() and int(raw) > 0 else default_l
+        ProtocolChecker(cfg, dao, keys).run(threads=threads, login_threads=login_threads)
         export_protocol_report(dao, cfg.resolve(REPORT_PROTOCOLS))
+    elif action == "bridge_agw":
+        from src.core.agw_bridge import AgwBridge
+
+        keys = excel.sync_to_db(cfg.resolve(cfg.paths.wallets_xlsx), dao)
+        AgwBridge(cfg, dao, keys).run(dry_run=cfg.mode.dry_run)
     elif action == "run":
         keys = excel.sync_to_db(cfg.resolve(cfg.paths.wallets_xlsx), dao)
         Pipeline(cfg, dao, keys).run(dry_run=cfg.mode.dry_run)

@@ -69,16 +69,24 @@ class AmountsCfg(BaseModel):
 
 class ExecutionCfg(BaseModel):
     concurrency: int = 3
-    check_concurrency: int = 3      # потоков для чекера протоколов (браузерных сессий параллельно)
+    check_concurrency: int = 3      # потоков DeBank-проверок (headless-браузеры, лёгкие)
+    login_concurrency: int = 2      # потоков входа на relay.link (headful Chromium — ТЯЖЁЛЫЙ;
+                                    # много потоков перегружает машину -> входы падают; при сбоях = 1)
     login_proxy_tries: int = 8      # сколько прокси перебрать на вход relay.link (часть режет Cloudflare)
     quote_ttl_sec: int = 30
     status_poll_interval_sec: int = 2
     status_timeout_sec: int = 900
     tx_confirmations: int = 1
     wallet_delay_sec: tuple[float, float] = (3, 10)
+    login_delay_sec: tuple[float, float] = (15, 30)  # пауза между входами В ОДНОМ потоке (анти-рейтлимит Cloudflare)
+    target_poll_interval_sec: int = 30  # как часто перечитывать XLSX в ожидании биржевого адреса
 
     def random_delay(self) -> float:
         lo, hi = self.wallet_delay_sec
+        return random.uniform(lo, hi)
+
+    def login_delay(self) -> float:
+        lo, hi = self.login_delay_sec
         return random.uniform(lo, hi)
 
 
@@ -110,6 +118,7 @@ class ProxyCfg(BaseModel):
 
 class TokensCfg(BaseModel):
     discovery: str = "relay_currencies_plus_onchain"
+    native_only: bool = True        # ЕДИНСТВЕННАЯ цель моста — native ETH; сканирование ERC-20 отключено
     include_native_eth: bool = True
     verified_only: bool = False
     use_external_search: bool = False

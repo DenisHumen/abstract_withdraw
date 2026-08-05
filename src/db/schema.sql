@@ -107,6 +107,21 @@ CREATE TABLE IF NOT EXISTS wallet_tokens_debank (
   UNIQUE(wallet_id, chain, symbol)
 );
 
+-- Задачи чекера протоколов: на КАЖДЫЙ кошелёк ровно ДВЕ задачи (проверено идемпотентно):
+--   1) get_agw          — получить Privy/AGW-адрес входом на relay.link
+--   2) check_protocols  — проверить протоколы на DeBank по этому адресу
+-- Если agw_address уже есть в wallets -> задача get_agw сразу помечается DONE и идём к check_protocols.
+CREATE TABLE IF NOT EXISTS check_tasks (
+  id          INTEGER PRIMARY KEY,
+  wallet_id   INTEGER NOT NULL REFERENCES wallets(id),
+  task        TEXT NOT NULL,                 -- 'get_agw' | 'check_protocols'
+  status      TEXT NOT NULL DEFAULT 'PENDING', -- PENDING | RUNNING | DONE | FAILED
+  last_error  TEXT,
+  updated_at  TEXT NOT NULL,
+  UNIQUE(wallet_id, task)
+);
+
+CREATE INDEX IF NOT EXISTS idx_check_tasks_wallet ON check_tasks(wallet_id);
 CREATE INDEX IF NOT EXISTS idx_wp_wallet ON wallet_protocols(wallet_id);
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);

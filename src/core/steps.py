@@ -266,8 +266,10 @@ def forward_transfer(ctx: WalletCtx, job: Job) -> None:
         raise RetryableError(f"на Base нечего пересылать: balance={balance}, резерв={reserve}")
 
     tx_hash = ctx.base.transfer_native(ctx.wallet.target_address, amount)
-    ctx.dao.update_job(job.id, status="TRANSFERRED")
+    # СНАЧАЛА фиксируем tx_hash в tx_log, ПОТОМ статус: если упадём между записями,
+    # resume найдёт отправленную tx и дождётся receipt вместо повторной отправки.
     ctx.dao.log_tx(job.id, "transfer", ctx.base.chain_id, tx_hash, None, status="sent")
+    ctx.dao.update_job(job.id, status="TRANSFERRED")
     receipt = ctx.base.wait_receipt(tx_hash, timeout=300, confirmations=ctx.cfg.execution.tx_confirmations)
     ctx.dao.log_tx(job.id, "transfer", ctx.base.chain_id, tx_hash, None,
                    status="confirmed", gas_used=receipt.get("gasUsed"))

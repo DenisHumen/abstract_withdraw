@@ -89,12 +89,18 @@ class ProxyPool:
         if not p:
             return None
 
-        if self.cfg.health_check and not self.health_check(p):
-            self.mark_dead(p)
-            p = self.pick_random(exclude=p)
-            source = "pool"
-            if p is None:
-                raise ProxyError("нет живых прокси в пуле")
+        # health-check с заменой: каждую кандидатку тоже проверяем (замена может быть такой же мёртвой)
+        if self.cfg.health_check:
+            for _ in range(5):  # ограничение, чтобы не сканировать весь пул на каждый кошелёк
+                if self.health_check(p):
+                    break
+                self.mark_dead(p)
+                p = self.pick_random(exclude=p)
+                source = "pool"
+                if p is None:
+                    raise ProxyError("нет живых прокси в пуле")
+            else:
+                raise ProxyError("не нашлось живой прокси за 5 попыток")
 
         if self.cfg.persist_assignment:
             self.dao.set_wallet_proxy(wallet_id, p, source or "pool", "ok")

@@ -11,6 +11,7 @@ UI relay.link рендерится в shadow DOM (Dynamic) — Playwright-лок
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 
 from playwright.sync_api import Page, BrowserContext, TimeoutError as PWTimeout
@@ -18,6 +19,13 @@ from playwright.sync_api import Page, BrowserContext, TimeoutError as PWTimeout
 from src import logger
 
 RELAY_BRIDGE_URL = "https://relay.link/bridge/abstract?fromChainId=2741&toChainId=8453"
+# Privy cross-app popup первый раз грузится ДОЛГО (со слов пользователя — прилично времени).
+# Ждём и появления окна, и прорисовки его содержимого щедро — до 2 минут на каждый этап.
+POPUP_APPEAR_SEC = 120   # сколько ждём, пока окно Privy вообще откроется (ретраим клик Abstract)
+POPUP_LOAD_SEC = 120     # сколько ждём прорисовки содержимого попапа (кнопки 'Continue with a wallet' и т.д.)
+# Тексты ошибок авторизации в Privy-попапе: если высветились — ждать бесполезно,
+# сразу проваливаем попытку (ensure_agw ротирует прокси и пробует заново).
+PRIVY_FAIL_TEXTS = ("Could not log in with wallet", "Unable to connect wallet")
 ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
 
@@ -39,7 +47,7 @@ def _click_first(page: Page, names: list[str], timeout: int = 4000) -> str | Non
     return None
 
 
-def login(page: Page, context: BrowserContext, timeout_ms: int = 60000) -> LoginResult:
+def login(page: Page, context: BrowserContext) -> LoginResult:
     """Полный вход как AGW. Наш инжект-провайдер должен быть уже установлен в контексте."""
     page.goto(RELAY_BRIDGE_URL, wait_until="domcontentloaded")
     page.wait_for_timeout(2000)
@@ -50,102 +58,173 @@ def login(page: Page, context: BrowserContext, timeout_ms: int = 60000) -> Login
         logger.info(f"уже подключён AGW {agw[:10]}", step="BROWSER")
         return LoginResult(agw, True)
 
-    # Ждём готовности SPA и жмём Connect. Устойчиво к медленному рендеру при параллельном запуске:
-    # ждём появления кнопки Connect до ~40с, а не фиксированную паузу.
-    connected = False
-    for _ in range(40):
+    # Жмём Connect, ПОКА не откроется модалка выбора кошелька. Критерий успеха — появление
+    # поля поиска модалки (testid 'dynamic-auth-modal'), а НЕ «клик не бросил исключение»:
+    # сам клик флейкует (анимация/оверлеи/чат-виджет Intercom перехватывает pointer). Поэтому
+    # каждую секунду перепроверяем модалку и при её отсутствии снова жмём любую connect-кнопку.
+    # Кнопки: testid 'widget-connect-wallet-button' (фиолетовая CONNECT WALLET в виджете),
+    # затем 'Connect Wallet'/'Connect' (верхняя). Клик — обычный, при неудаче force (поверх оверлея).
+    auth = page.get_by_test_id("dynamic-auth-modal")
+    search = auth.get_by_placeholder("Search through", exact=False)
+
+    def modal_open() -> bool:
+        try:
+            return search.count() > 0
+        except Exception:  # noqa: BLE001
+            return False
+
+    def click_connect() -> bool:
+        # прячем чат-виджет Intercom, если он перехватывает клики
+        try:
+            page.evaluate("() => { const f=document.querySelector('iframe[name^=intercom]');"
+                          " if (f) f.style.pointerEvents='none'; }")
+        except Exception:  # noqa: BLE001
+            pass
+        for getter in (
+            lambda: page.get_by_test_id("widget-connect-wallet-button"),
+            lambda: page.get_by_role("button", name="Connect Wallet", exact=False),
+            lambda: page.get_by_role("button", name="Connect", exact=False),
+        ):
+            try:
+                b = getter()
+                if b.count() == 0:
+                    continue
+                try:
+                    b.first.click(timeout=2500)
+                except Exception:  # noqa: BLE001 — оверлей/анимация -> пробуем force
+                    b.first.click(timeout=2500, force=True)
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
+
+    populated = False
+    for i in range(90):  # до ~90с: медленный рендер через прокси + флейковый клик
         agw = _read_connected_agw(page)
         if agw:
             return LoginResult(agw, True)
-        try:
-            btn = page.get_by_role("button", name="Connect", exact=False)
-            if btn.count() > 0:
-                btn.first.click(timeout=4000)
-                connected = True
-                break
-        except Exception:
-            pass
-        page.wait_for_timeout(1000)
-    if not connected:
-        logger.warn("кнопка Connect не появилась", step="BROWSER")
-        return LoginResult(None, False)
-    page.wait_for_timeout(3000)
-
-    # выбрать Abstract и дождаться попапа Privy; UI флейков -> ретраим клик, пока попап не откроется
-    modal = page.locator("[data-testid='dynamic-modal']")
-    # Модалка Dynamic (список кошельков) через прокси грузится МЕДЛЕННО — до минуты (со слов пользователя,
-    # Cloudflare пропускает, но долго). Ждём появления поля поиска до ~60с; только если и через минуту
-    # не подгрузилось — считаем прокси непригодной и ротируем (см. ensure_agw).
-    populated = False
-    for _ in range(60):
-        try:
-            if modal.get_by_placeholder("Search through", exact=False).count() > 0:
-                populated = True
-                break
-        except Exception:
-            pass
+        if modal_open():
+            populated = True
+            break
+        clicked = click_connect()
+        if i % 5 == 0:
+            logger.info(f"жду модалку кошельков (Connect {'нажат' if clicked else 'не найден'}, {i}с)",
+                        step="BROWSER")
         page.wait_for_timeout(1000)
     if not populated:
-        logger.warn("модалка кошельков не загрузилась за 60с — ротация прокси", step="BROWSER")
+        logger.warn("модалка кошельков не открылась за ~90с (Connect не сработал) — ротация прокси",
+                    step="BROWSER")
         return LoginResult(None, False)
     logger.info("модалка кошельков загрузилась", step="BROWSER")
+    # фильтруем список до одного кошелька Abstract, чтобы клик попадал точно в строку AGW
     try:
-        modal.get_by_placeholder("Search through", exact=False).fill("Abstract", timeout=6000)
-        page.wait_for_timeout(2000)
+        search.first.fill("Abstract", timeout=6000)
+        page.wait_for_timeout(1500)
     except Exception:
         pass
 
+    # Клик строки Abstract флейкует (shadow DOM Dynamic) -> ретраим, пока не откроется Privy popup.
+    # Строку берём внутри auth-модалки по точному тексту 'Abstract' (проверено: get_by_text exact).
+    # Первая прогрузка окна Privy бывает долгой -> ждём его появления суммарно до POPUP_APPEAR_SEC (~2 мин).
     privy = None
-    for attempt in range(6):
+    appear_deadline = time.time() + POPUP_APPEAR_SEC
+    attempt = 0
+    while time.time() < appear_deadline and not privy:
+        attempt += 1
         clicked = False
         for loc in [
-            page.get_by_text("Abstract", exact=True),          # .last = строка в модалке (проверено в PoC)
-            modal.get_by_text("Abstract", exact=True),
+            auth.get_by_text("Abstract", exact=True),
+            auth.get_by_test_id("wallet-icon-abstract"),
+            page.get_by_text("Abstract", exact=True),
         ]:
             try:
-                loc.last.click(timeout=5000)
-                clicked = True
-                break
+                if loc.count() > 0:
+                    loc.first.click(timeout=5000)
+                    clicked = True
+                    break
             except Exception:
                 continue
-        logger.info(f"Abstract клик попытка {attempt + 1}: {'ok' if clicked else 'fail'}", step="BROWSER")
-        # Privy cross-app popup через прокси открывается небыстро -> ждём щедро (до ~20с на попытку)
+        logger.info(f"Abstract клик попытка {attempt}: {'ok' if clicked else 'fail'}", step="BROWSER")
+        # окно Privy обычно открывается за ~2с, но первая прогрузка/флейк -> ждём щедро (до 20с на попытку)
         privy = _wait_for_privy_popup(context, 20000)
         if privy:
             break
         page.wait_for_timeout(1500)
     if not privy:
-        logger.warn("Privy popup не открылся", step="BROWSER")
+        logger.warn("Privy popup не открылся (ждали до 2 мин)", step="BROWSER")
         return LoginResult(None, False)
     logger.info(f"Privy popup: {privy.url[:60]}", step="BROWSER")
 
-    # драйвим попап тем же приоритетом кнопок, что и в проверенном PoC:
-    # Continue with a wallet -> MetaMask -> (наш SIWE) -> Approve. Каждую итерацию просто
-    # кликаем первую доступную кнопку из списка (Approve появится на экране согласия).
-    # 16 итераций x ~2.5с — попап через прокси реагирует медленно.
-    for _ in range(16):
-        if privy.is_closed():
-            break
-        privy.wait_for_timeout(2500)
+    # Экран Privy 'Log in to Abstract' -> 'Continue with a wallet' -> MetaMask (наш инжект) ->
+    # SIWE (провайдер подписывает) -> Approve/Continue. Пункты могут быть НЕ button-role (строки-иконки),
+    # поэтому пробуем и role=button, и просто текст. СОДЕРЖИМОЕ попапа первый раз прорисовывается долго
+    # -> крутим цикл до POPUP_LOAD_SEC (~2 мин), пока кнопки не появятся и не прожмём Approve.
+    # КРИТИЧНО: после клика 'Approve' попап ЗАКРЫВАЕТСЯ (=успех, кросс-апп подключение прошло).
+    # Любой последующий вызов на закрытом попапе кидает TargetClosedError -> НЕЛЬЗЯ давать ему
+    # уронить login (иначе успешный вход рапортуется как провал). Всё взаимодействие с попапом —
+    # в try/except; закрытие попапа = штатное завершение.
+    approved = False
+    drive_deadline = time.time() + POPUP_LOAD_SEC
+    while time.time() < drive_deadline:
+        try:
+            if privy.is_closed():
+                break
+            privy.wait_for_timeout(2500)
+        except Exception:
+            break  # попап закрылся — подтверждение ушло
+        # Ошибка авторизации в попапе -> fail-fast: не досиживаем таймауты, сразу ротация прокси.
+        fail = _detect_privy_fail(privy)
+        if fail:
+            logger.warn(f"popup: «{fail}» — вход не удался, сразу ротация прокси", step="BROWSER")
+            return LoginResult(None, False)
         for name in ["Continue with a wallet", "MetaMask", "Approve", "Continue", "Sign", "Confirm"]:
-            try:
-                btn = privy.get_by_role("button", name=name, exact=False)
-                if btn.count() > 0:
-                    btn.first.click(timeout=3000)
-                    logger.info(f"popup: клик '{name}'", step="BROWSER")
-                    if name == "Approve":
+            clicked = False
+            for loc in [
+                privy.get_by_role("button", name=name, exact=False),
+                privy.get_by_text(name, exact=False),
+            ]:
+                try:
+                    if loc.count() > 0:
+                        loc.first.click(timeout=3000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if clicked:
+                logger.info(f"popup: клик '{name}'", step="BROWSER")
+                if name == "Approve":
+                    approved = True
+                    try:
                         privy.wait_for_timeout(1500)
-                    break
-            except Exception:
-                pass
+                    except Exception:
+                        pass  # попап закрылся сразу после Approve — это норма
+                break
+        if approved and privy.is_closed():
+            break
 
-    page.wait_for_timeout(4000)
-    agw = _read_connected_agw(page)
+    # Подключение завершается асинхронно после закрытия попапа -> читаем AGW терпеливо (до ~20с).
+    agw = None
+    for _ in range(20):
+        agw = _read_connected_agw(page)
+        if agw:
+            break
+        page.wait_for_timeout(1000)
     return LoginResult(agw, bool(agw))
 
 
+def _detect_privy_fail(privy: Page) -> str | None:
+    """Вернуть текст ошибки авторизации, если он высветился в попапе (иначе None).
+    Закрывшийся попап — не ошибка (обрабатывается выше по is_closed)."""
+    for t in PRIVY_FAIL_TEXTS:
+        try:
+            if privy.get_by_text(t, exact=False).count() > 0:
+                return t
+        except Exception:  # noqa: BLE001 — попап закрылся между проверками
+            return None
+    return None
+
+
 def _wait_for_privy_popup(context: BrowserContext, timeout_ms: int):
-    import time
     deadline = time.time() + timeout_ms / 1000
     while time.time() < deadline:
         for pg in list(context.pages):
@@ -162,7 +241,7 @@ def _read_connected_agw(page: Page) -> str | None:
         if raw:
             m = re.search(r'"accounts":\s*\[\s*"(0x[a-fA-F0-9]{40})"', raw)
             if m:
-                return page.evaluate("(a)=>a", m.group(1))
+                return m.group(1)
     except Exception:
         pass
     return None
